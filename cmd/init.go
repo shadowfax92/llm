@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -70,10 +71,44 @@ func initRun(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("create symlink: %w", err)
 	}
 
+	copyTemplates(centralPath)
+
 	if err := addToRegistry(rel); err != nil {
 		return fmt.Errorf("update registry: %w", err)
 	}
 
 	fmt.Printf("Initialized: .llm → %s\n", tildefy(centralPath))
 	return nil
+}
+
+func copyTemplates(destDir string) {
+	templateDir := filepath.Join(llmRoot, "templates")
+	entries, err := os.ReadDir(templateDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		dest := filepath.Join(destDir, e.Name())
+		if _, err := os.Stat(dest); err == nil {
+			continue // don't overwrite existing files
+		}
+		copyFile(filepath.Join(templateDir, e.Name()), dest)
+	}
+}
+
+func copyFile(src, dst string) {
+	in, err := os.Open(src)
+	if err != nil {
+		return
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return
+	}
+	defer out.Close()
+	io.Copy(out, in)
 }
