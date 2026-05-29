@@ -15,6 +15,7 @@ You use `.llm/` folders to store design docs, PRDs, and AI context for your proj
 - 🔄 **Worktree-safe** — worktrees come and go, your context stays
 - 📦 **Auto-migration** — existing `.llm/` directories are moved on init
 - 🌳 **Multi-checkout** — multiple checkouts can share the same `.llm` store
+- 🧭 **Auto-linking** — infer the right store from Git worktree metadata
 - 🔍 **Interactive linking** — pick existing projects via [fzf](https://github.com/junegunn/fzf)
 
 ---
@@ -45,7 +46,11 @@ llm
 cd ~/code/my-project-worktree
 llm link code/my-project
 
-# 4. List all managed projects
+# 4. In a Git worktree, infer the matching store automatically
+cd ~/code/my-project/.worktrees/feature
+llm link --auto
+
+# 5. List all managed projects
 llm ls
 ```
 
@@ -58,7 +63,7 @@ llm ls
 
 `llm init` takes the current directory's path relative to `$HOME` and creates a matching directory under `~/llm/`. If a real `.llm/` folder already exists, its content is moved to the central store. A symlink replaces it.
 
-`llm link` points `.llm` at an existing project in the store — useful for multiple checkouts of the same repo, or git worktrees that should share context.
+`llm link` points `.llm` at an existing project in the store — useful for multiple checkouts of the same repo, or git worktrees that should share context. `llm link --auto` uses Git's common directory for the current worktree to infer the original checkout's store, while preserving any subdirectory path inside the worktree.
 
 A registry at `~/llm/.projects` tracks all managed projects.
 
@@ -69,19 +74,20 @@ llm                    # show .llm status for current directory
 llm init               # centralize .llm and create symlink
 llm link               # pick existing project via fzf, link to it
 llm link <project>     # link directly (e.g. in grove setup commands)
+llm link --auto        # infer project from Git worktree metadata
 llm ls                 # list all managed projects
 ```
 
 ## Grove Integration
 
-Add `llm link` to your grove repo setup commands so worktrees automatically get the symlink:
+Add `llm link --auto` to your grove repo setup commands so worktrees automatically get the symlink:
 
 ```yaml
 repos:
   - path: ~/code/my-project
     name: my-project
     setup:
-      - llm link code/my-project
+      - llm link --auto
 ```
 
 ---

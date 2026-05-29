@@ -18,14 +18,29 @@ var linkCmd = &cobra.Command{
 	RunE:  linkRun,
 }
 
+var linkAuto bool
+
 func init() {
+	linkCmd.Flags().BoolVar(&linkAuto, "auto", false, "Link based on the canonical Git worktree path")
 	rootCmd.AddCommand(linkCmd)
 }
 
 func linkRun(cmd *cobra.Command, args []string) error {
 	var project string
 
-	if len(args) > 0 {
+	if linkAuto {
+		if len(args) > 0 {
+			return fmt.Errorf("llm link --auto does not accept a project argument")
+		}
+		cwd, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		project, err = resolveAutoLinkProject(cwd, homeDir)
+		if err != nil {
+			return err
+		}
+	} else if len(args) > 0 {
 		project = args[0]
 	} else {
 		projects, err := loadRegistry()
@@ -94,6 +109,88 @@ func linkRun(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Linked: .llm → %s\n", tildefy(centralPath))
 	return nil
+}
+
+// resolveAutoLinkProject maps a Git worktree path back to the canonical project key in ~/llm.
+// It uses Git's common directory so linked worktrees share the primary checkout's .llm store.
+func resolveAutoLinkProject(startDir, home string) (string, error) {
+	startDir, err := realPath(startDir)
+	if err != nil {
+		return "", err
+	}
+	home, err = realPath(home)
+	if err != nil {
+		return "", err
+	}
+
+	worktreeRoot, err := gitOutput(startDir, "rev-parse", "--path-format=absolute", "--show-toplevel")
+	if err != nil {
+		return "", fmt.Errorf("resolve git worktree root: %w", err)
+	}
+	worktreeRoot, err = realPath(worktreeRoot)
+	if err != nil {
+		return "", err
+	}
+	commonGitDir, err := gitOutput(startDir, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return "", fmt.Errorf("resolve git common dir: %w", err)
+	}
+	commonGitDir, err = realPath(commonGitDir)
+	if err != nil {
+		return "", err
+	}
+
+	canonicalRoot := canonicalProjectRoot(worktreeRoot, commonGitDir)
+	insideWorktree, err := filepath.Rel(worktreeRoot, startDir)
+	if err != nil {
+		return "", err
+	}
+	if insideWorktree == ".." || strings.HasPrefix(insideWorktree, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("%s is outside git worktree root %s", startDir, worktreeRoot)
+	}
+
+	projectPath := canonicalRoot
+	if insideWorktree != "." {
+		projectPath = filepath.Join(projectPath, insideWorktree)
+	}
+
+	project, err := filepath.Rel(home, projectPath)
+	if err != nil {
+		return "", err
+	}
+	if project == ".." || strings.HasPrefix(project, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("project must be under home directory (%s)", home)
+	}
+	return project, nil
+}
+
+func realPath(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(abs)
+}
+
+func canonicalProjectRoot(worktreeRoot, commonGitDir string) string {
+	commonGitDir = filepath.Clean(commonGitDir)
+	if filepath.Base(commonGitDir) == ".git" {
+		return filepath.Dir(commonGitDir)
+	}
+	return filepath.Clean(worktreeRoot)
+}
+
+func gitOutput(dir string, args ...string) (string, error) {
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("%s (%w)", strings.TrimSpace(string(out)), err)
+	}
+	result := strings.TrimSpace(string(out))
+	if result == "" {
+		return "", fmt.Errorf("empty git output")
+	}
+	return filepath.Clean(result), nil
 }
 
 // mergeDir copies regular files from src into dst. Files that already exist
