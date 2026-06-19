@@ -111,8 +111,7 @@ func linkRun(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// resolveAutoLinkProject maps a Git worktree path back to the canonical project key in ~/llm.
-// It uses Git's common directory so linked worktrees share the primary checkout's .llm store.
+// resolveAutoLinkProject maps a Git worktree path to the existing or inferred project key in ~/llm.
 func resolveAutoLinkProject(startDir, home string) (string, error) {
 	startDir, err := realPath(startDir)
 	if err != nil {
@@ -153,6 +152,11 @@ func resolveAutoLinkProject(startDir, home string) (string, error) {
 	if insideWorktree != "." {
 		projectPath = filepath.Join(projectPath, insideWorktree)
 	}
+	if project, ok, err := linkedProject(projectPath, home); err != nil {
+		return "", err
+	} else if ok {
+		return project, nil
+	}
 
 	project, err := filepath.Rel(home, projectPath)
 	if err != nil {
@@ -162,6 +166,45 @@ func resolveAutoLinkProject(startDir, home string) (string, error) {
 		return "", fmt.Errorf("project must be under home directory (%s)", home)
 	}
 	return project, nil
+}
+
+// linkedProject returns the registry key from an existing .llm symlink.
+func linkedProject(projectPath, home string) (string, bool, error) {
+	llmPath := filepath.Join(projectPath, ".llm")
+	info, err := os.Lstat(llmPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		return "", false, nil
+	}
+
+	target, err := os.Readlink(llmPath)
+	if err != nil {
+		return "", false, err
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(projectPath, target)
+	}
+	target, err = realPath(target)
+	if err != nil {
+		return "", false, fmt.Errorf("resolve %s: %w", llmPath, err)
+	}
+	root, err := realPath(filepath.Join(home, "llm"))
+	if err != nil {
+		return "", false, fmt.Errorf("resolve llm root: %w", err)
+	}
+	project, err := filepath.Rel(root, target)
+	if err != nil {
+		return "", false, err
+	}
+	if project == ".." || strings.HasPrefix(project, ".."+string(os.PathSeparator)) {
+		return "", false, fmt.Errorf("%s points outside llm root (%s)", llmPath, root)
+	}
+	return project, true, nil
 }
 
 func realPath(path string) (string, error) {

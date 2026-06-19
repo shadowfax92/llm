@@ -30,6 +30,36 @@ func TestResolveAutoLinkProjectUsesCommonGitDirForWorktree(t *testing.T) {
 	}
 }
 
+func TestResolveAutoLinkProjectUsesCanonicalCheckoutLink(t *testing.T) {
+	home := t.TempDir()
+	base := filepath.Join(home, "code", "browseros-project", "grove-ref", "main-3")
+	worktree := filepath.Join(home, "worktrees", "m3", "feature")
+	nested := filepath.Join(worktree, "packages", "browseros-agent")
+	linkedProject := filepath.Join(home, "llm", "code", "browseros-project", "grove-ref", "browseros-main", "packages", "browseros-agent")
+	baseNested := filepath.Join(base, "packages", "browseros-agent")
+
+	initGitRepo(t, base)
+	runGit(t, base, "worktree", "add", worktree, "-b", "feature")
+	for _, dir := range []string{nested, linkedProject, baseNested} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(linkedProject, filepath.Join(baseNested, ".llm")); err != nil {
+		t.Fatal(err)
+	}
+
+	project, err := resolveAutoLinkProject(nested, home)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := filepath.Join("code", "browseros-project", "grove-ref", "browseros-main", "packages", "browseros-agent")
+	if project != want {
+		t.Fatalf("project = %q, want %q", project, want)
+	}
+}
+
 func TestResolveAutoLinkProjectUsesCurrentRootForPrimaryCheckout(t *testing.T) {
 	home := t.TempDir()
 	base := filepath.Join(home, "code", "project")
