@@ -134,6 +134,9 @@ func archiveProjectSummaries(cutoff time.Time) ([]archiveSummary, error) {
 	for _, project := range projects {
 		projectDir, err := projectStorePath(project)
 		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
 			return nil, err
 		}
 		candidates, err := archiveCandidates(projectDir, cutoff)
@@ -201,7 +204,23 @@ func projectStorePath(project string) (string, error) {
 	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
 		return "", fmt.Errorf("invalid project %q", project)
 	}
-	return filepath.Join(llmRoot, clean), nil
+
+	root, err := realPath(llmRoot)
+	if err != nil {
+		return "", fmt.Errorf("resolve llm root: %w", err)
+	}
+	projectDir, err := realPath(filepath.Join(llmRoot, clean))
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(root, projectDir)
+	if err != nil {
+		return "", err
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("project %q resolves outside llm root", project)
+	}
+	return projectDir, nil
 }
 
 func archiveSelectedProjects(out io.Writer, projects []string, cutoff, now time.Time) error {

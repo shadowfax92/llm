@@ -147,6 +147,25 @@ func TestArchiveProjectRejectsPathsOutsideLLMRoot(t *testing.T) {
 	assertMissing(t, filepath.Join(outsideDir, "archive", "old.md"))
 }
 
+func TestArchiveProjectRejectsSymlinkedProjectOutsideLLMRoot(t *testing.T) {
+	root := setTestLLMRoot(t)
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	cutoff := now.AddDate(0, 0, -30)
+	old := now.AddDate(0, 0, -31)
+	outsideDir := filepath.Join(filepath.Dir(root), "outside")
+	writeFileAt(t, filepath.Join(outsideDir, "old.md"), old)
+	if err := os.Symlink(outsideDir, filepath.Join(root, "evil")); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := archiveProject("evil", cutoff, now)
+	if err == nil {
+		t.Fatal("expected archiveProject to reject symlinked project outside llm root")
+	}
+	assertExists(t, filepath.Join(outsideDir, "old.md"))
+	assertMissing(t, filepath.Join(outsideDir, "archive", "old.md"))
+}
+
 func archiveCandidateNames(candidates []archiveCandidate) []string {
 	names := make([]string, 0, len(candidates))
 	for _, candidate := range candidates {
