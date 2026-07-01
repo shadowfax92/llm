@@ -101,7 +101,7 @@ func archiveCandidates(projectDir string, cutoff time.Time) ([]archiveCandidate,
 
 	var candidates []archiveCandidate
 	for _, entry := range entries {
-		if entry.Name() == "archive" {
+		if entry.Name() == "archive" && entry.IsDir() {
 			continue
 		}
 
@@ -175,6 +175,10 @@ func archiveProject(project string, cutoff, now time.Time) (archiveResult, error
 	if len(candidates) == 0 {
 		return result, nil
 	}
+	candidates, err = stageArchiveFileCandidate(projectDir, candidates, now)
+	if err != nil {
+		return result, err
+	}
 	if err := os.MkdirAll(result.archiveDir, 0755); err != nil {
 		return result, err
 	}
@@ -192,6 +196,32 @@ func archiveProject(project string, cutoff, now time.Time) (archiveResult, error
 		})
 	}
 	return result, nil
+}
+
+func stageArchiveFileCandidate(projectDir string, candidates []archiveCandidate, now time.Time) ([]archiveCandidate, error) {
+	for i := range candidates {
+		if candidates[i].name != "archive" {
+			continue
+		}
+
+		info, err := os.Lstat(candidates[i].path)
+		if err != nil {
+			return nil, err
+		}
+		if info.IsDir() {
+			continue
+		}
+
+		staged, err := uniqueProjectPath(projectDir, ".archive-archiving-"+now.Format("20060102-150405"))
+		if err != nil {
+			return nil, err
+		}
+		if err := os.Rename(candidates[i].path, staged); err != nil {
+			return nil, err
+		}
+		candidates[i].path = staged
+	}
+	return candidates, nil
 }
 
 // projectStorePath rejects project keys that would escape the managed llm root.
@@ -221,6 +251,26 @@ func projectStorePath(project string) (string, error) {
 		return "", fmt.Errorf("project %q resolves outside llm root", project)
 	}
 	return projectDir, nil
+}
+
+func uniqueProjectPath(projectDir, name string) (string, error) {
+	path := filepath.Join(projectDir, name)
+	if _, err := os.Lstat(path); err != nil {
+		if os.IsNotExist(err) {
+			return path, nil
+		}
+		return "", err
+	}
+
+	for i := 2; ; i++ {
+		candidate := filepath.Join(projectDir, fmt.Sprintf("%s-%d", name, i))
+		if _, err := os.Lstat(candidate); err != nil {
+			if os.IsNotExist(err) {
+				return candidate, nil
+			}
+			return "", err
+		}
+	}
 }
 
 func archiveSelectedProjects(out io.Writer, projects []string, cutoff, now time.Time) error {

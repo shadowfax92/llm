@@ -42,6 +42,26 @@ func TestArchiveCandidatesUsesRecursiveNewestModTime(t *testing.T) {
 	}
 }
 
+func TestArchiveCandidatesIncludesStaleArchiveFile(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	cutoff := now.AddDate(0, 0, -30)
+	old := now.AddDate(0, 0, -31)
+	projectDir := t.TempDir()
+
+	writeFileAt(t, filepath.Join(projectDir, "archive"), old)
+
+	candidates, err := archiveCandidates(projectDir, cutoff)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	names := archiveCandidateNames(candidates)
+	want := []string{"archive"}
+	if !slices.Equal(names, want) {
+		t.Fatalf("candidates = %v, want %v", names, want)
+	}
+}
+
 func TestArchiveProjectMovesStaleEntriesAndKeepsFreshEntries(t *testing.T) {
 	root := setTestLLMRoot(t)
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
@@ -70,6 +90,27 @@ func TestArchiveProjectMovesStaleEntriesAndKeepsFreshEntries(t *testing.T) {
 	assertMissing(t, filepath.Join(projectDir, "old-dir"))
 	assertExists(t, filepath.Join(projectDir, "archive", "old-dir", "notes.md"))
 	assertExists(t, filepath.Join(projectDir, "fresh.md"))
+}
+
+func TestArchiveProjectArchivesStaleArchiveFile(t *testing.T) {
+	root := setTestLLMRoot(t)
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	cutoff := now.AddDate(0, 0, -30)
+	old := now.AddDate(0, 0, -31)
+	project := filepath.Join("code", "project")
+	projectDir := filepath.Join(root, project)
+
+	writeFileAt(t, filepath.Join(projectDir, "archive"), old)
+
+	result, err := archiveProject(project, cutoff, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(result.moved) != 1 {
+		t.Fatalf("moved = %d, want 1", len(result.moved))
+	}
+	assertExists(t, filepath.Join(projectDir, "archive", "archive"))
 }
 
 func TestArchiveProjectUsesUniqueDestinationForCollisions(t *testing.T) {
