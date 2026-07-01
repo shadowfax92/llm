@@ -20,7 +20,7 @@ func TestArchiveCandidatesUsesRecursiveNewestModTime(t *testing.T) {
 
 	oldDir := filepath.Join(projectDir, "old-dir")
 	writeFileAt(t, filepath.Join(oldDir, "notes.md"), old)
-	chtimes(t, oldDir, old)
+	chtimes(t, oldDir, fresh)
 
 	activeDir := filepath.Join(projectDir, "active-dir")
 	writeFileAt(t, filepath.Join(activeDir, "notes.md"), fresh)
@@ -55,7 +55,7 @@ func TestArchiveProjectMovesStaleEntriesAndKeepsFreshEntries(t *testing.T) {
 	writeFileAt(t, filepath.Join(projectDir, "fresh.md"), fresh)
 	oldDir := filepath.Join(projectDir, "old-dir")
 	writeFileAt(t, filepath.Join(oldDir, "notes.md"), old)
-	chtimes(t, oldDir, old)
+	chtimes(t, oldDir, fresh)
 
 	result, err := archiveProject(project, cutoff, now)
 	if err != nil {

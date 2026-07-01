@@ -106,7 +106,7 @@ func archiveCandidates(projectDir string, cutoff time.Time) ([]archiveCandidate,
 		}
 
 		path := filepath.Join(projectDir, entry.Name())
-		newest, err := newestModTime(path)
+		newest, err := newestContentModTime(path)
 		if err != nil {
 			return nil, err
 		}
@@ -292,21 +292,37 @@ func uniqueArchivePath(archiveDir, name string, now time.Time) (string, error) {
 	}
 }
 
-func newestModTime(path string) (time.Time, error) {
+func newestContentModTime(path string) (time.Time, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if !info.IsDir() {
+		return info.ModTime(), nil
+	}
+
 	var newest time.Time
-	err := filepath.WalkDir(path, func(path string, entry os.DirEntry, walkErr error) error {
+	foundContent := false
+	err = filepath.WalkDir(path, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
 		}
 		info, err := entry.Info()
 		if err != nil {
 			return err
 		}
+		foundContent = true
 		if info.ModTime().After(newest) {
 			newest = info.ModTime()
 		}
 		return nil
 	})
+	if err == nil && !foundContent {
+		newest = info.ModTime()
+	}
 	return newest, err
 }
 
