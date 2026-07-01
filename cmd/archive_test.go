@@ -131,6 +131,22 @@ func TestArchiveProjectSummariesUseRegistryCounts(t *testing.T) {
 	assertExists(t, filepath.Join(root, projectOne, "old.md"))
 }
 
+func TestArchiveProjectRejectsPathsOutsideLLMRoot(t *testing.T) {
+	root := setTestLLMRoot(t)
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	cutoff := now.AddDate(0, 0, -30)
+	old := now.AddDate(0, 0, -31)
+	outsideDir := filepath.Join(filepath.Dir(root), "outside")
+	writeFileAt(t, filepath.Join(outsideDir, "old.md"), old)
+
+	_, err := archiveProject(filepath.Join("..", "outside"), cutoff, now)
+	if err == nil {
+		t.Fatal("expected archiveProject to reject project outside llm root")
+	}
+	assertExists(t, filepath.Join(outsideDir, "old.md"))
+	assertMissing(t, filepath.Join(outsideDir, "archive", "old.md"))
+}
+
 func archiveCandidateNames(candidates []archiveCandidate) []string {
 	names := make([]string, 0, len(candidates))
 	for _, candidate := range candidates {

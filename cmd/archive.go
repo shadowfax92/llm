@@ -132,7 +132,11 @@ func archiveProjectSummaries(cutoff time.Time) ([]archiveSummary, error) {
 
 	var summaries []archiveSummary
 	for _, project := range projects {
-		candidates, err := archiveCandidates(filepath.Join(llmRoot, project), cutoff)
+		projectDir, err := projectStorePath(project)
+		if err != nil {
+			return nil, err
+		}
+		candidates, err := archiveCandidates(projectDir, cutoff)
 		if err != nil {
 			if os.IsNotExist(err) {
 				continue
@@ -152,10 +156,13 @@ func archiveProjectSummaries(cutoff time.Time) ([]archiveSummary, error) {
 
 // archiveProject moves stale top-level entries for one registered project into its archive folder.
 func archiveProject(project string, cutoff, now time.Time) (archiveResult, error) {
-	projectDir := filepath.Join(llmRoot, project)
+	projectDir, err := projectStorePath(project)
 	result := archiveResult{
 		project:    project,
 		archiveDir: filepath.Join(projectDir, "archive"),
+	}
+	if err != nil {
+		return result, err
 	}
 
 	candidates, err := archiveCandidates(projectDir, cutoff)
@@ -182,6 +189,19 @@ func archiveProject(project string, cutoff, now time.Time) (archiveResult, error
 		})
 	}
 	return result, nil
+}
+
+// projectStorePath rejects project keys that would escape the managed llm root.
+func projectStorePath(project string) (string, error) {
+	if filepath.IsAbs(project) {
+		return "", fmt.Errorf("invalid project %q", project)
+	}
+
+	clean := filepath.Clean(project)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("invalid project %q", project)
+	}
+	return filepath.Join(llmRoot, clean), nil
 }
 
 func archiveSelectedProjects(out io.Writer, projects []string, cutoff, now time.Time) error {
