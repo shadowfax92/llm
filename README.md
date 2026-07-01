@@ -52,6 +52,9 @@ llm link --auto
 
 # 5. List all managed projects
 llm ls
+
+# 6. Archive stale context older than 30 days
+llm archive
 ```
 
 ## How It Works
@@ -76,6 +79,9 @@ llm link               # pick existing project via fzf, link to it
 llm link <project>     # link directly (e.g. in grove setup commands)
 llm link --auto        # infer project from Git worktree metadata
 llm ls                 # list all managed projects
+llm archive            # fzf-select projects with entries older than 30 days and archive them
+llm archive --list     # show stale entry counts per project without moving anything
+llm archive <project>  # archive stale entries for a project without fzf
 ```
 
 ## Grove Integration
