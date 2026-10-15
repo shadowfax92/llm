@@ -309,23 +309,31 @@ func (r *renderer) bindingRows(b contextstore.Binding) []treeRow {
 
 // bindingNext suggests what resolves a non-linked state. Every suggestion is
 // non-destructive: init and link never overwrite store files, and removing a
-// dangling symlink deletes no context.
+// dangling symlink deletes no context. Commands carry -C <anchor directory>
+// because status may have been run with -C elsewhere; without it, pasting
+// the command would act on the shell's current directory instead.
 func (r *renderer) bindingNext(b contextstore.Binding) []next {
+	dotllm := "dotllm"
+	if b.Anchor != "" {
+		dotllm += " -C " + r.shellArg(filepath.Dir(b.Anchor))
+	}
 	switch b.State {
 	case "missing":
-		return []next{{"dotllm init", "create the store if needed and link .llm"}}
+		return []next{{dotllm + " init", "create the store if needed and link .llm"}}
 	case "local":
 		return []next{
-			{"dotllm init", "move .llm into the store when the store has no copy yet"},
-			{"dotllm link <project>", "or merge into an existing store; .llm is kept as .llm.bak"},
+			{dotllm + " init", "move .llm into the store when the store has no copy yet"},
+			{dotllm + " link <project>", "or merge into an existing store; .llm is kept as .llm.bak"},
 		}
 	case "dangling":
 		return []next{
-			{"dotllm link <project>", "point .llm at an existing store (see dotllm list)"},
-			{"rm " + r.shellArg(b.Anchor) + " && dotllm init", "or replace the broken link with a fresh store"},
+			{dotllm + " link <project>", "point .llm at an existing store (see dotllm list)"},
+			{"rm " + r.shellArg(b.Anchor) + " && " + dotllm + " init", "or replace the broken link with a fresh store"},
 		}
 	case "conflict":
-		return []next{{"mv " + r.shellArg(b.Anchor) + " " + r.shellArg(b.Anchor+".aside") + " && dotllm init", "keep it, then link a store"}}
+		// -n: never clobber an existing .llm.aside. If the move is skipped,
+		// the init after it reports the same conflict and changes nothing.
+		return []next{{"mv -n " + r.shellArg(b.Anchor) + " " + r.shellArg(b.Anchor+".aside") + " && " + dotllm + " init", "keep it under a new name, then link a store"}}
 	}
 	return nil
 }
@@ -439,14 +447,22 @@ func (r *renderer) link(l LinkData) {
 	switch source := conflictSource(store, l.Conflicts); {
 	case source != "":
 		r.next("next", []next{{"diff -r " + r.shellArg(source) + " " + r.shellArg(store), "review what was not copied; nothing was overwritten"}})
+	case len(l.Conflicts) > 0:
+		r.line(r.style.paint(muted, "note: compare each kept entry above with its store copy before removing anything"))
 	case l.BackupPath != "":
 		r.line(r.style.paint(muted, "note: every file is in the store; "+r.tilde(l.BackupPath)+" stays until you remove it"))
 	}
 }
 
+// insideRel reports whether a filepath.Rel result stays inside its base. Only
+// a real ".." component leaves it; a name such as "..notes.md" does not.
+func insideRel(rel string) bool {
+	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
 func (r *renderer) storeRelative(store, path string) string {
 	if store != "" {
-		if rel, err := filepath.Rel(store, path); err == nil && rel != "." && !strings.HasPrefix(rel, "..") {
+		if rel, err := filepath.Rel(store, path); err == nil && insideRel(rel) {
 			return rel
 		}
 	}
@@ -459,7 +475,7 @@ func conflictSource(store string, conflicts []contextstore.Change) string {
 	source := ""
 	for _, change := range conflicts {
 		rel, err := filepath.Rel(store, change.Path)
-		if err != nil || strings.HasPrefix(rel, "..") {
+		if err != nil || !insideRel(rel) {
 			return ""
 		}
 		dir, ok := strings.CutSuffix(change.PreservedAt, string(filepath.Separator)+rel)
@@ -603,9 +619,16 @@ func (r *renderer) plan(command string, p archive.Plan) {
 		meta += " · last modified before " + r.when(p.Cutoff)
 	}
 	r.line(r.style.paint(muted, meta))
+	// Only flags the commands define today: archive saves plans with
+	// --plan-out; restore has no plan-saving flag yet, so its guidance stops
+	// at applying a saved plan rather than inventing one.
+	if op == "restore" {
+		r.next("next", []next{{"dotllm restore --apply --plan <file>", "apply only what a saved restore plan lists"}})
+		return
+	}
 	r.next("next", []next{
-		{"dotllm " + op + " <same arguments> --plan-out <file>", "save this exact plan for review"},
-		{"dotllm " + op + " --apply --plan <file>", "then apply only what that file lists"},
+		{"dotllm archive <same arguments> --plan-out <file>", "save this exact plan for review"},
+		{"dotllm archive --apply --plan <file>", "then apply only what that file lists"},
 	})
 }
 

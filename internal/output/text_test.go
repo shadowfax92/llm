@@ -82,17 +82,18 @@ func TestStatusEndsEveryUnhealthyStateWithANextCommand(t *testing.T) {
 code/foo  [no .llm]
 ├── anchor  ~/code/foo/.llm  missing
 └── store   ~/llm/code/foo   not linked
-next: dotllm init   # create the store if needed and link .llm
+next: dotllm -C ~/code/foo init   # create the store if needed and link .llm
 `)
 
 	// Resolve reports no project for a dangling link, so the header falls back
-	// to the checkout and the suggested rm names the exact (quoted) anchor.
+	// to the checkout. Commands name the exact (quoted) anchor and directory, so
+	// they act on that checkout even when status ran with -C from elsewhere.
 	dangling := contextstore.Binding{Anchor: "/Users/me/code/my repo/.llm", State: "dangling"}
 	assertText(t, render(t, "status", StatusData{Binding: dangling}, false), `
 ~/code/my repo  [dangling]
 └── anchor  ~/code/my repo/.llm  symlink to a directory that no longer exists
-next: dotllm link <project>                             # point .llm at an existing store (see dotllm list)
-      rm '/Users/me/code/my repo/.llm' && dotllm init   # or replace the broken link with a fresh store
+next: dotllm -C '/Users/me/code/my repo' link <project>                             # point .llm at an existing store (see dotllm list)
+      rm '/Users/me/code/my repo/.llm' && dotllm -C '/Users/me/code/my repo' init   # or replace the broken link with a fresh store
 `)
 
 	for _, state := range []string{"local", "conflict"} {
@@ -100,6 +101,12 @@ next: dotllm link <project>                             # point .llm at an exist
 		if !strings.Contains(got, "\nnext: ") {
 			t.Fatalf("%s status has no next command:\n%s", state, got)
 		}
+	}
+	// The conflict anchor is a file we know nothing about: the suggested move
+	// must refuse to clobber an existing .llm.aside.
+	conflict := render(t, "status", StatusData{Binding: contextstore.Binding{Anchor: "/Users/me/code/foo/.llm", State: "conflict"}}, false)
+	if !strings.Contains(conflict, "next: mv -n ~/code/foo/.llm ~/code/foo/.llm.aside && dotllm -C ~/code/foo init") {
+		t.Fatalf("conflict guidance must not clobber:\n%s", conflict)
 	}
 }
 
@@ -134,6 +141,22 @@ func TestLinkWithoutChangesSaysAlreadyLinked(t *testing.T) {
 	assertText(t, render(t, "link", LinkData{Binding: binding}, false), `
 Already linked: ~/code/foo/.llm → ~/llm/code/foo
 `)
+}
+
+// A name that merely starts with ".." is still inside the store: the kept
+// entry must keep its review command and never claim everything was copied.
+func TestKeptDotDotNamedEntryStillGetsReviewGuidance(t *testing.T) {
+	binding := contextstore.Binding{Project: contextstore.Project{Key: "code/foo", Root: "/Users/me/llm/code/foo"}, Anchor: "/Users/me/code/foo/.llm", State: "managed"}
+	result := LinkData{Binding: binding, Changed: true, BackupPath: "/Users/me/code/foo/.llm.bak", Conflicts: []contextstore.Change{
+		{Path: "/Users/me/llm/code/foo/..notes.md", PreservedAt: "/Users/me/code/foo/.llm.bak/..notes.md"},
+	}}
+	got := render(t, "link", result, false)
+	if !strings.Contains(got, "  ~ ..notes.md  kept at ~/code/foo/.llm.bak/..notes.md\n") || !strings.Contains(got, "next: diff -r ~/code/foo/.llm.bak ~/llm/code/foo") {
+		t.Fatalf("kept ..-prefixed entry lost its guidance:\n%s", got)
+	}
+	if strings.Contains(got, "every file is in the store") {
+		t.Fatalf("claims everything was copied while an entry was kept:\n%s", got)
+	}
 }
 
 func TestLinkBoundsCopiedListButNeverKeptList(t *testing.T) {
@@ -221,8 +244,13 @@ next: dotllm archive <same arguments> --plan-out <file>   # save this exact plan
 func TestRestorePlanPreview(t *testing.T) {
 	plan := archive.Plan{ID: "r1", Operation: "restore", Entries: []archive.Entry{{ProjectKey: "code/a", RelativePath: "old.md", SizeBytes: 10}}}
 	got := render(t, "restore", ArchiveData{Plan: plan}, false)
-	if !strings.HasPrefix(got, "Would restore 1 entry into code/a (nothing moved)\n") || !strings.Contains(got, "dotllm restore --apply --plan <file>") {
+	if !strings.HasPrefix(got, "Would restore 1 entry into code/a (nothing moved)\n") || !strings.Contains(got, "next: dotllm restore --apply --plan <file>") {
 		t.Fatalf("restore preview:\n%s", got)
+	}
+	// restore defines no --plan-out; guidance must not send users to a flag
+	// that fails with "unknown flag".
+	if strings.Contains(got, "--plan-out") {
+		t.Fatalf("restore guidance names an undefined flag:\n%s", got)
 	}
 }
 
