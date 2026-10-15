@@ -11,9 +11,9 @@
 You keep design docs, plans and agent context in a gitignored `.llm/` folder. Delete a Git worktree and that folder goes with it. dotllm keeps the real files in one central store, `~/llm/`, mirroring your project paths, and makes `.llm` in each checkout a symlink to it. Worktrees come and go; the context stays.
 
 - **Central store.** Everything lives under `~/llm/<path relative to $HOME>`, listed in `~/llm/.projects`.
-- **Shared across checkouts.** Every worktree of a repository can point `.llm` at the same store.
+- **One store per repository.** Every worktree of a repository links `.llm` at the repository root to the same store, from any subdirectory, created on first use.
 - **Never overwrites.** Adopting or relinking a real `.llm` copies what is missing into the store and leaves everything else where it was, then tells you exactly where.
-- **Built for agents.** `--json` gives one versioned object on stdout, errors are structured on stderr, exit codes are stable, and nothing ever prompts.
+- **Built for agents.** `--json` gives one versioned object on stdout, errors are structured on stderr, exit codes are stable, and nothing prompts unless you ask for `--pick` on a terminal.
 - **Archive with a review step.** Old entries are previewed first; nothing moves without `--apply` on a saved plan.
 
 ---
@@ -34,19 +34,25 @@ make completions   # optional: fish completions for both names
 ## Quick start
 
 ```console
-$ cd ~/code/my-project
-$ dotllm init
+$ cd ~/code/my-project/pkg/cli
+$ dotllm init                   # anchors at the repository root, not here
 Linked ~/code/my-project/.llm → ~/llm/code/my-project
-
-$ dotllm status
-code/my-project  [linked]
-├── anchor  ~/code/my-project/.llm
-└── store   ~/llm/code/my-project
 
 $ cd ~/code/my-project/.wt/feature
 $ dotllm link --auto            # same store as the main checkout
 Linked ~/code/my-project/.wt/feature/.llm → ~/llm/code/my-project
+
+$ dotllm status
+code/my-project  [linked]
+├── anchor     ~/code/my-project/.wt/feature/.llm
+├── store      ~/llm/code/my-project
+├── checkout   ~/code/my-project/.wt/feature       worktree
+└── canonical  ~/code/my-project
+
+$ cd "$(dotllm path)"           # the store itself
 ```
+
+Plain `dotllm` does the same as `dotllm path`. It creates the link if it is missing and prints the store path. Outside a Git repository, pass `--scope cwd` to `init` to anchor `.llm` in the current directory.
 
 The *anchor* is the `.llm` entry inside a checkout. The *store* is the central directory it points to:
 
@@ -59,26 +65,25 @@ The *anchor* is the `.llm` entry inside a checkout. The *store* is the central d
 
 | Command | What it does | Writes? |
 |---|---|---|
-| `dotllm status` | Shows the anchor, the store it points to, and what to do if it's missing, a real directory, or broken. | No |
-| `dotllm init` | Links `.llm` here. Creates the store, or moves an existing real `.llm` into it when the store has no copy yet. Running it again is a no-op. | Yes |
-| `dotllm link --auto` | Links this Git checkout or worktree to its repository's store. This is what Grove setup runs. | Yes |
-| `dotllm link <project>` | Links to an existing project's store, for example `code/shared-notes`. Files from the old target are merged and never overwritten. | Yes |
+| `dotllm status` | Shows the anchor, the store it points to, the Git checkout, and what to do if `.llm` is missing, a real directory, or broken. | No |
+| `dotllm init` | Links `.llm` at the repository root, creating the store or adopting an existing real `.llm`. Running it again is a no-op. Use `--scope cwd` for a separate nested `.llm` or outside Git, and `--project <key>` to choose the store. | Yes |
+| `dotllm link --auto` | Does the same as `init` for this checkout or worktree. This is what Grove setup runs. | Yes |
+| `dotllm link <project>` | Links to an existing project's store, for example `code/shared-notes`. Files from the old target are merged and never overwritten. `--pick` chooses the project with fzf, on a terminal only. | Yes |
 | `dotllm path` | Ensures context exists, then prints the store path and nothing else: `cd "$(dotllm path)"`. | Yes |
 | `dotllm list` (`ls`) | Lists the projects in the store and marks the current one. | No |
-| `dotllm config` | Shows the effective store root, where it came from, the config file, and this checkout's link. `config --path` prints only the file path. | No |
+| `dotllm config` | Shows the effective store root, where it came from, the config file, and this checkout's link. `config --path` prints only the file path. `config edit` opens it in `$VISUAL`/`$EDITOR`, on a terminal only. | No (`edit`: yes) |
 | `dotllm archive` | Previews old entries, saves an exact plan with `--plan-out`, and applies it with `--apply --plan`. | Only with `--apply` |
 | `dotllm restore` | Previews or applies putting an archive back. | Only with `--apply` |
 
 Every command takes `-C <dir>` (run as if in that directory), `--store <dir>`, `--json`, `--no-input` and `--color auto|always|never`. Run `dotllm <command> --help` for examples.
 
-**Not available in this build yet.** Some commands are defined but report `unavailable` (exit 5) and change nothing: running `dotllm` with no command, `dotllm path`, `init --scope repo` (repository-root anchoring from any subdirectory), `link --pick`, `config edit`, and `archive`/`restore`. Until then, use `dotllm init` in the directory that should hold `.llm`, and `dotllm link --auto` in worktrees.
+**Not available in this build yet:** `archive` and `restore` report `unavailable` (exit 5) and move nothing until the archive slice lands.
 
 ## When `.llm` already exists
 
 dotllm never deletes or overwrites context. Here is what each case does:
 
-- **A real `.llm` directory and an empty store.** `dotllm init` moves the directory into the store and links it.
-- **A real `.llm` directory and a store that already exists.** `dotllm link <project>` renames `.llm` to `.llm.bak`, copies every file the store lacks, and leaves the rest in `.llm.bak`:
+- **A real `.llm` directory.** `dotllm init` (or `link`) renames it to `.llm.bak`, copies every file the store lacks, and leaves the rest in `.llm.bak`:
 
   ```console
   $ dotllm link code/foo
@@ -92,8 +97,16 @@ dotllm never deletes or overwrites context. Here is what each case does:
   ```
 
   `.llm.bak` stays until you remove it. If a `.llm.bak` already exists, linking stops and changes nothing.
-- **`.llm` already points to another store.** Linking copies the files the new store lacks and leaves the old store untouched.
-- **A broken `.llm` symlink.** `dotllm status` says so and prints the exact repair command.
+- **`.llm` already points to another store.** `dotllm link <project>` copies the files the new store lacks and leaves the old store untouched.
+- **A broken link, a link outside the store, or a plain file.** dotllm won't replace these. `dotllm status` names the state and prints the exact command to set it aside first:
+
+  ```console
+  $ dotllm status
+  ~/code/ext  [external]
+  ├── anchor    ~/code/ext/.llm  symlink to a directory outside the store
+  └── checkout  ~/code/ext
+  next: rm ~/code/ext/.llm && dotllm -C ~/code/ext init   # removes only the symlink; copy anything you need from its target
+  ```
 
 ## For agents and scripts
 
@@ -106,8 +119,8 @@ $ dotllm status --json
 
 - Success: `{"version":1,"command":…,"data":…,"warnings":[…]}` on stdout, with absolute paths.
 - Failure: stdout stays empty, and one object goes to stderr: `{"version":1,"error":{"code","message","next_action","retryable"}}`. A partial archive or restore also includes the `partial` result.
-- `binding.state` is one of `managed`, `missing`, `local` (a real directory), `dangling` or `conflict`. `status`, `list` and `config` never write. A state is data, so `status` exits 0 when it can report one. A link it can't classify, such as one pointing outside the store, fails with exit 4 and a `next_action`.
-- Nothing prompts. A bare `dotllm link` fails with exit 2 and a `next_action`; it never opens a picker. Picking interactively will only ever happen with `--pick` on a terminal.
+- `binding.state` is one of `managed`, `missing`, `local` (a real directory), `dangling` (its store directory is gone), `external` (it points outside the store) or `conflict` (it is not a directory). `status`, `list` and `config` never write, and `status` exits 0 for every state: a state is data, not an error.
+- Nothing prompts. A bare `dotllm link` fails with exit 2 and a `next_action`; it never opens a picker. `link --pick` and `config edit` refuse to run without a terminal, under `--json`, or with `--no-input`.
 - Human output is coloured only on a terminal. `NO_COLOR`, `TERM=dumb`, `--color never` and `--json` all turn it off. Path output (`path`, `config --path`) is always a single bare line.
 
 | Exit | Meaning | Error codes |
@@ -116,7 +129,7 @@ $ dotllm status --json
 | 2 | Bad usage, invalid config, or a selector is needed | `invalid_input`, `invalid_config`, `selector_required` |
 | 3 | Missing context or project | `missing_context`, `missing_project` |
 | 4 | Conflict, or a plan went stale | `conflict`, `stale_plan` |
-| 5 | I/O failure or unavailable operation | `io_error`, `unavailable`, … |
+| 5 | I/O failure, another writer holds the lock, no Git identity, or unavailable | `io_error`, `busy`, `identity_ambiguous`, `unavailable`, … |
 | 130 | Cancelled | `cancelled` |
 
 ## Archive and restore
@@ -149,8 +162,8 @@ The config file lives at `$XDG_CONFIG_HOME/dotllm/config.json`, falling back to 
 | `llm` | `dotllm` | What changed |
 |---|---|---|
 | `llm` (status) | `dotllm status` | Bare `dotllm` ensures context and prints the store path |
-| `llm init` | `dotllm init` | Same behaviour, and it reports what it moved |
-| `llm link` (fzf) | `dotllm link <project>` or `--auto` | A bare `link` explains the selectors instead of opening fzf |
+| `llm init` | `dotllm init` | Anchors at the repository root from any subdirectory; `--scope cwd` for a nested `.llm` |
+| `llm link` (fzf) | `dotllm link --pick` | A bare `link` explains the selectors instead of opening fzf |
 | `llm link <project>` | unchanged | Lists what was copied and where kept entries are |
 | `llm link --auto` | unchanged | — |
 | `llm ls` | `dotllm list` (`ls` still works) | Marks the current project |

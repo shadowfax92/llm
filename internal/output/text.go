@@ -266,6 +266,8 @@ func stateLabel(state string) cell {
 		return cell{"[local dir]", attention}
 	case "dangling":
 		return cell{"[dangling]", danger}
+	case "external":
+		return cell{"[external]", attention}
 	case "conflict":
 		return cell{"[conflict]", danger}
 	}
@@ -282,7 +284,9 @@ func (r *renderer) bindingRows(b contextstore.Binding) []treeRow {
 	case "local":
 		anchor = append(anchor, cell{"real directory, not shared with other checkouts", attention})
 	case "dangling":
-		anchor = append(anchor, cell{"symlink to a directory that no longer exists", danger})
+		anchor = append(anchor, cell{"symlink to a store directory that no longer exists", danger})
+	case "external":
+		anchor = append(anchor, cell{"symlink to a directory outside the store", attention})
 	case "conflict":
 		anchor = append(anchor, cell{"not a directory or a managed symlink", danger})
 	}
@@ -307,33 +311,44 @@ func (r *renderer) bindingRows(b contextstore.Binding) []treeRow {
 	return rows
 }
 
-// bindingNext suggests what resolves a non-linked state. Every suggestion is
-// non-destructive: init and link never overwrite store files, and removing a
-// dangling symlink deletes no context. Commands carry -C <anchor directory>
-// because status may have been run with -C elsewhere; without it, pasting
-// the command would act on the shell's current directory instead.
+// bindingNext suggests what resolves a non-linked state, matching how
+// contextstore treats each one: init (Ensure) adopts missing and local
+// anchors, a dangling one needs an explicit link, and external or conflicting
+// entries are never replaced, so they must be moved aside first. Every
+// suggestion is non-destructive: init and link never overwrite store files,
+// and rm on a symlink removes only the link, never its target.
+//
+// Commands carry -C <anchor directory> because status may have run with -C
+// elsewhere; without it, pasting would act on the shell's current directory.
+// Repository scope needs Git, so outside a Git checkout init gets --scope cwd.
 func (r *renderer) bindingNext(b contextstore.Binding) []next {
 	dotllm := "dotllm"
 	if b.Anchor != "" {
 		dotllm += " -C " + r.shellArg(filepath.Dir(b.Anchor))
 	}
+	initCmd := dotllm + " init"
+	if b.WorktreeRoot == "" {
+		initCmd += " --scope cwd"
+	}
 	switch b.State {
 	case "missing":
-		return []next{{dotllm + " init", "create the store if needed and link .llm"}}
+		return []next{{initCmd, "create the store if needed and link .llm"}}
 	case "local":
 		return []next{
-			{dotllm + " init", "move .llm into the store when the store has no copy yet"},
-			{dotllm + " link <project>", "or merge into an existing store; .llm is kept as .llm.bak"},
+			{initCmd, "copy its files into the store; the original stays as .llm.bak"},
+			{dotllm + " link <project>", "or merge into another project's store instead"},
 		}
 	case "dangling":
 		return []next{
 			{dotllm + " link <project>", "point .llm at an existing store (see dotllm list)"},
-			{"rm " + r.shellArg(b.Anchor) + " && " + dotllm + " init", "or replace the broken link with a fresh store"},
+			{"rm " + r.shellArg(b.Anchor) + " && " + initCmd, "or drop the broken link and create a fresh store"},
 		}
+	case "external":
+		return []next{{"rm " + r.shellArg(b.Anchor) + " && " + initCmd, "removes only the symlink; copy anything you need from its target"}}
 	case "conflict":
 		// -n: never clobber an existing .llm.aside. If the move is skipped,
 		// the init after it reports the same conflict and changes nothing.
-		return []next{{"mv -n " + r.shellArg(b.Anchor) + " " + r.shellArg(b.Anchor+".aside") + " && " + dotllm + " init", "keep it under a new name, then link a store"}}
+		return []next{{"mv -n " + r.shellArg(b.Anchor) + " " + r.shellArg(b.Anchor+".aside") + " && " + initCmd, "keep it under a new name, then link a store"}}
 	}
 	return nil
 }

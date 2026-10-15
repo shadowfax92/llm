@@ -77,26 +77,29 @@ code/docs  [linked]
 }
 
 func TestStatusEndsEveryUnhealthyStateWithANextCommand(t *testing.T) {
-	missing := contextstore.Binding{Project: contextstore.Project{Key: "code/foo", Root: "/Users/me/llm/code/foo"}, Anchor: "/Users/me/code/foo/.llm", State: "missing"}
+	// A Git checkout: repository scope is the default, so plain init is exact.
+	missing := contextstore.Binding{Project: contextstore.Project{Key: "code/foo", Root: "/Users/me/llm/code/foo"}, Anchor: "/Users/me/code/foo/.llm", WorktreeRoot: "/Users/me/code/foo", CanonicalRoot: "/Users/me/code/foo", State: "missing"}
 	assertText(t, render(t, "status", StatusData{Binding: missing}, false), `
 code/foo  [no .llm]
-├── anchor  ~/code/foo/.llm  missing
-└── store   ~/llm/code/foo   not linked
+├── anchor    ~/code/foo/.llm  missing
+├── store     ~/llm/code/foo   not linked
+└── checkout  ~/code/foo
 next: dotllm -C ~/code/foo init   # create the store if needed and link .llm
 `)
 
 	// Resolve reports no project for a dangling link, so the header falls back
 	// to the checkout. Commands name the exact (quoted) anchor and directory, so
-	// they act on that checkout even when status ran with -C from elsewhere.
+	// they act on that checkout even when status ran with -C from elsewhere;
+	// outside Git, init needs --scope cwd.
 	dangling := contextstore.Binding{Anchor: "/Users/me/code/my repo/.llm", State: "dangling"}
 	assertText(t, render(t, "status", StatusData{Binding: dangling}, false), `
 ~/code/my repo  [dangling]
-└── anchor  ~/code/my repo/.llm  symlink to a directory that no longer exists
-next: dotllm -C '/Users/me/code/my repo' link <project>                             # point .llm at an existing store (see dotllm list)
-      rm '/Users/me/code/my repo/.llm' && dotllm -C '/Users/me/code/my repo' init   # or replace the broken link with a fresh store
+└── anchor  ~/code/my repo/.llm  symlink to a store directory that no longer exists
+next: dotllm -C '/Users/me/code/my repo' link <project>                                         # point .llm at an existing store (see dotllm list)
+      rm '/Users/me/code/my repo/.llm' && dotllm -C '/Users/me/code/my repo' init --scope cwd   # or drop the broken link and create a fresh store
 `)
 
-	for _, state := range []string{"local", "conflict"} {
+	for _, state := range []string{"local", "external", "conflict"} {
 		got := render(t, "status", StatusData{Binding: contextstore.Binding{Anchor: "/Users/me/code/foo/.llm", State: state}}, false)
 		if !strings.Contains(got, "\nnext: ") {
 			t.Fatalf("%s status has no next command:\n%s", state, got)
@@ -105,7 +108,7 @@ next: dotllm -C '/Users/me/code/my repo' link <project>                         
 	// The conflict anchor is a file we know nothing about: the suggested move
 	// must refuse to clobber an existing .llm.aside.
 	conflict := render(t, "status", StatusData{Binding: contextstore.Binding{Anchor: "/Users/me/code/foo/.llm", State: "conflict"}}, false)
-	if !strings.Contains(conflict, "next: mv -n ~/code/foo/.llm ~/code/foo/.llm.aside && dotllm -C ~/code/foo init") {
+	if !strings.Contains(conflict, "next: mv -n ~/code/foo/.llm ~/code/foo/.llm.aside && dotllm -C ~/code/foo init --scope cwd") {
 		t.Fatalf("conflict guidance must not clobber:\n%s", conflict)
 	}
 }

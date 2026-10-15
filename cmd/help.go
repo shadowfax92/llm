@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 // Help presentation for the dotllm command tree.
@@ -126,8 +127,10 @@ func writeHelp(w io.Writer, cmd *cobra.Command, name string) error {
 
 // helpColor applies the same policy as command output (cmd/root.go write):
 // --json or --color never turns it off, --color always forces it, and auto
-// needs a terminal on stdout with NO_COLOR unset and TERM not dumb. Help runs
-// before PersistentPreRunE, so it reads the parsed flags directly.
+// needs a real terminal on stdout (main.go's term.IsTerminal test, which
+// unlike a character-device check excludes /dev/null) with NO_COLOR unset and
+// TERM not dumb. Help runs before PersistentPreRunE, so it reads the parsed
+// flags directly and checks the stream it is about to write.
 func helpColor(cmd *cobra.Command) bool {
 	flags := cmd.Root().PersistentFlags()
 	if jsonMode, _ := flags.GetBool("json"); jsonMode {
@@ -143,11 +146,7 @@ func helpColor(cmd *cobra.Command) bool {
 		return false
 	}
 	file, ok := cmd.OutOrStdout().(*os.File)
-	if !ok {
-		return false
-	}
-	info, err := file.Stat()
-	return err == nil && info.Mode()&os.ModeCharDevice != 0
+	return ok && term.IsTerminal(int(file.Fd()))
 }
 
 // Grove's help palette (grove/cmd/style.go): bold cyan section titles, green
