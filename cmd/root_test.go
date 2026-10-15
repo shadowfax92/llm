@@ -21,7 +21,7 @@ func TestCommandsKeepJSONAndErrorsOnSeparateStreams(t *testing.T) {
 		args []string
 		code int
 	}{
-		{[]string{"init", "--json"}, 0},
+		{[]string{"init", "--scope", "cwd", "--json"}, 0},
 		{[]string{"status", "--json"}, 0},
 		{[]string{"list", "--json"}, 0},
 		{[]string{"archive", "--json"}, 5},
@@ -68,7 +68,7 @@ func TestNewRootsDoNotShareFlagOrWorkingDirectoryState(t *testing.T) {
 			t.Fatal(err)
 		}
 		var out, diagnostics bytes.Buffer
-		if code := Execute([]string{"init", "--json", "-C", cwd}, Dependencies{Out: &out, Err: &diagnostics, Home: home, Cwd: home}); code != 0 {
+		if code := Execute([]string{"init", "--scope", "cwd", "--json", "-C", cwd}, Dependencies{Out: &out, Err: &diagnostics, Home: home, Cwd: home}); code != 0 {
 			t.Fatalf("code=%d: %s", code, &diagnostics)
 		}
 		if _, err := os.Readlink(filepath.Join(cwd, ".llm")); err != nil {
@@ -77,7 +77,7 @@ func TestNewRootsDoNotShareFlagOrWorkingDirectoryState(t *testing.T) {
 	}
 }
 
-func TestReadOnlyCommandsAndUnavailableRootDoNotInitialize(t *testing.T) {
+func TestReadOnlyCommandsAndNonGitRootDoNotInitialize(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("DOTLLM_ROOT", "")
@@ -89,7 +89,7 @@ func TestReadOnlyCommandsAndUnavailableRootDoNotInitialize(t *testing.T) {
 		var out, diagnostics bytes.Buffer
 		code := Execute(args, Dependencies{Home: home, Cwd: cwd, Out: &out, Err: &diagnostics})
 		if (args[0] == "path" || args[0] == "--json") && code != 5 {
-			t.Fatalf("stub code=%d: %s", code, &diagnostics)
+			t.Fatalf("non-Git code=%d: %s", code, &diagnostics)
 		}
 		if _, err := os.Lstat(filepath.Join(home, "llm")); !os.IsNotExist(err) {
 			t.Fatalf("%v initialized store: %v", args, err)

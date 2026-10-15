@@ -27,7 +27,7 @@ func TestResolveAutoLinkProjectUsesCommonGitDirForWorktree(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := filepath.Join("code", "project", "packages", "cli")
+	want := filepath.Join("code", "project")
 	if project != want {
 		t.Fatalf("project = %q, want %q", project, want)
 	}
@@ -80,18 +80,18 @@ func TestResolveAutoLinkProjectUsesCurrentRootForPrimaryCheckout(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := filepath.Join("code", "project", "packages", "cli")
+	want := filepath.Join("code", "project")
 	if project != want {
 		t.Fatalf("project = %q, want %q", project, want)
 	}
 }
 
-func TestResolveAutoLinkProjectRequiresGitRepo(t *testing.T) {
+func TestReadOnlyResolveOutsideGitReportsMissing(t *testing.T) {
 	home := t.TempDir()
 
-	_, err := testStore(t, home).Resolve(context.Background(), home, ResolveOptions{Scope: ScopeRepo})
-	if err == nil {
-		t.Fatal("expected error")
+	binding, err := testStore(t, home).Resolve(context.Background(), home, ResolveOptions{Scope: ScopeRepo})
+	if err != nil || binding.State != "missing" {
+		t.Fatalf("binding=%+v err=%v", binding, err)
 	}
 }
 

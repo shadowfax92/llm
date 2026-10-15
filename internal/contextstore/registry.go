@@ -8,11 +8,20 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 )
 
 func (s *Store) Projects(ctx context.Context) ([]Project, error) {
 	projects := []Project{}
-	f, err := os.Open(filepath.Join(s.cfg.Root, ".projects"))
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if info, err := os.Lstat(filepath.Join(s.cfg.Root, ".projects")); err == nil && !info.Mode().IsRegular() {
+		return nil, conflict("registry must be a regular file")
+	} else if err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+	f, err := os.OpenFile(filepath.Join(s.cfg.Root, ".projects"), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if os.IsNotExist(err) {
 		return projects, nil
 	}
@@ -25,8 +34,8 @@ func (s *Store) Projects(ctx context.Context) ([]Project, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		key := strings.TrimSpace(scanner.Text())
-		if key == "" || strings.HasPrefix(key, "#") {
+		key := scanner.Text()
+		if strings.TrimSpace(key) == "" || strings.HasPrefix(key, "#") {
 			continue
 		}
 		root, err := s.projectPath(key, false)
@@ -42,10 +51,11 @@ func (s *Store) Projects(ctx context.Context) ([]Project, error) {
 	return slices.CompactFunc(projects, func(a, b Project) bool { return a.Key == b.Key }), nil
 }
 
-// Registry replacement is atomic so readers never observe a truncated list.
-// Cross-process locking belongs to the next context slice; no lock is claimed here.
-func (s *Store) addToRegistry(key string) error {
-	projects, err := s.Projects(context.Background())
+// Registry updates run under the store lock; temp+sync+rename keeps readers on
+// a complete sorted list. Reject symlink registries rather than replacing or
+// reading a file outside the store.
+func (s *Store) addToRegistry(ctx context.Context, key string) error {
+	projects, err := s.Projects(ctx)
 	if err != nil {
 		return err
 	}
@@ -78,6 +88,9 @@ func (s *Store) addToRegistry(key string) error {
 		return err
 	}
 	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	return os.Rename(f.Name(), filepath.Join(s.cfg.Root, ".projects"))

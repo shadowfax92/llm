@@ -9,100 +9,112 @@ import (
 	"strings"
 )
 
-// The baseline auto-link lookup preserves worktree-relative nested paths.
-// It is retained for compatibility, not a claim of the final canonical policy.
-func (s *Store) resolveAutoLinkProject(ctx context.Context, startDir string) (string, error) {
-	home := s.cfg.Home
-	startDir, err := realPath(startDir)
-	if err != nil {
-		return "", err
-	}
-	home, err = realPath(home)
-	if err != nil {
-		return "", err
-	}
-
-	worktreeRoot, err := gitOutput(ctx, startDir, "rev-parse", "--path-format=absolute", "--show-toplevel")
-	if err != nil {
-		return "", fmt.Errorf("resolve git worktree root: %w", err)
-	}
-	worktreeRoot, err = realPath(worktreeRoot)
-	if err != nil {
-		return "", err
-	}
-	commonGitDir, err := gitOutput(ctx, startDir, "rev-parse", "--path-format=absolute", "--git-common-dir")
-	if err != nil {
-		return "", fmt.Errorf("resolve git common dir: %w", err)
-	}
-	commonGitDir, err = realPath(commonGitDir)
-	if err != nil {
-		return "", err
-	}
-
-	canonicalRoot := canonicalProjectRoot(worktreeRoot, commonGitDir)
-	insideWorktree, err := filepath.Rel(worktreeRoot, startDir)
-	if err != nil {
-		return "", err
-	}
-	if insideWorktree == ".." || strings.HasPrefix(insideWorktree, ".."+string(os.PathSeparator)) {
-		return "", fmt.Errorf("%s is outside git worktree root %s", startDir, worktreeRoot)
-	}
-
-	projectPath := canonicalRoot
-	if insideWorktree != "." {
-		projectPath = filepath.Join(projectPath, insideWorktree)
-	}
-	if project, ok, err := s.linkedProject(projectPath); err != nil {
-		return "", err
-	} else if ok {
-		return project, nil
-	}
-
-	project, err := filepath.Rel(home, projectPath)
-	if err != nil {
-		return "", err
-	}
-	if project == ".." || strings.HasPrefix(project, ".."+string(os.PathSeparator)) {
-		return "", fmt.Errorf("project must be under home directory (%s)", home)
-	}
-	return project, nil
+// gitIdentity uses Git's own worktree records, including separate git dirs.
+// A missing/bare primary is retained as diagnostic identity, but never used to
+// invent a new store key. An existing durable binding can still be reused.
+type gitIdentity struct {
+	worktree, canonical, common string
+	canonicalValid              bool
 }
 
-// linkedProject returns the registry key from an existing .llm symlink.
-func (s *Store) linkedProject(projectPath string) (string, bool, error) {
-	llmPath := filepath.Join(projectPath, ".llm")
-	info, err := os.Lstat(llmPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", false, nil
+func discoverGit(ctx context.Context, cwd string) (id gitIdentity, err error) {
+	defer func() {
+		if ctx.Err() != nil {
+			err = ctx.Err()
 		}
-		return "", false, err
-	}
-	if info.Mode()&os.ModeSymlink == 0 {
-		return "", false, nil
-	}
-
-	target, err := os.Readlink(llmPath)
+	}()
+	inside, err := gitOutput(ctx, cwd, "rev-parse", "--is-inside-work-tree")
 	if err != nil {
-		return "", false, err
+		if ctx.Err() != nil {
+			return id, ctx.Err()
+		}
+		return id, nil
 	}
-	if !filepath.IsAbs(target) {
-		target = filepath.Join(projectPath, target)
-	}
-	target, err = realPath(target)
+	common, err := gitOutput(ctx, cwd, "rev-parse", "--path-format=absolute", "--git-common-dir")
 	if err != nil {
-		return "", false, fmt.Errorf("resolve %s: %w", llmPath, err)
+		return id, err
 	}
-	key, err := s.managedKey(target)
-	return key, err == nil, err
+	id.common, err = realPath(common)
+	if err != nil {
+		return id, err
+	}
+	if inside != "true" {
+		return id, nil
+	}
+	worktree, err := gitOutput(ctx, cwd, "rev-parse", "--path-format=absolute", "--show-toplevel")
+	if err != nil {
+		return id, err
+	}
+	id.worktree, err = realPath(worktree)
+	if err != nil {
+		return id, err
+	}
+	records, err := gitBytes(ctx, cwd, "worktree", "list", "--porcelain", "-z")
+	if err != nil {
+		return id, err
+	}
+	// With --separate-git-dir and no core.worktree, porcelain may list the
+	// metadata directory as the main worktree. A primary invocation itself is
+	// authoritative when its per-worktree git dir equals the common directory.
+	gitDir, e := gitOutput(ctx, cwd, "rev-parse", "--absolute-git-dir")
+	if e != nil {
+		return id, e
+	}
+	if sameResolvedPath(gitDir, id.common) {
+		id.canonical = id.worktree
+		id.canonicalValid = true
+		return id, nil
+	}
+	fields := strings.Split(string(records), "\x00")
+	bare := false
+	for _, field := range fields {
+		if field == "" {
+			break
+		}
+		if strings.HasPrefix(field, "worktree ") {
+			id.canonical = strings.TrimPrefix(field, "worktree ")
+		}
+		if field == "bare" {
+			bare = true
+		}
+	}
+	if id.canonical == "" || bare {
+		return id, nil
+	}
+	// Separate metadata directories may need core.worktree to identify the
+	// primary; this is Git configuration, not a guessed common-dir parent.
+	if configured, e := gitOutput(ctx, cwd, "config", "--path", "--get", "core.worktree"); e == nil {
+		if !filepath.IsAbs(configured) {
+			configured = filepath.Join(id.common, configured)
+		}
+		id.canonical = configured
+	}
+	canonical, e := realPath(id.canonical)
+	if e != nil {
+		return id, nil
+	}
+	// The record may be stale after a move or replacement. Verify both the root
+	// and common directory before treating another path as this repo's primary.
+	top, e := gitOutput(ctx, canonical, "rev-parse", "--path-format=absolute", "--show-toplevel")
+	if e != nil {
+		return id, nil
+	}
+	common, e = gitOutput(ctx, canonical, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if e != nil {
+		return id, nil
+	}
+	if sameResolvedPath(top, canonical) && sameResolvedPath(common, id.common) {
+		id.canonical = canonical
+		id.canonicalValid = true
+	}
+	return id, ctx.Err()
 }
 
 func realPath(path string) (string, error) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return "", err
+	if !filepath.IsAbs(path) {
+		return "", &Error{Code: "invalid_input", Message: "context paths must be absolute", NextAction: "Pass an absolute working directory."}
 	}
-	return filepath.EvalSymlinks(abs)
+	return filepath.EvalSymlinks(filepath.Clean(path))
 }
 
 func sameResolvedPath(a, b string) bool {
@@ -111,9 +123,7 @@ func sameResolvedPath(a, b string) bool {
 	if aErr == nil && bErr == nil {
 		return aReal == bReal
 	}
-	aAbs, aErr := filepath.Abs(a)
-	bAbs, bErr := filepath.Abs(b)
-	return aErr == nil && bErr == nil && filepath.Clean(aAbs) == filepath.Clean(bAbs)
+	return filepath.IsAbs(a) && filepath.IsAbs(b) && filepath.Clean(a) == filepath.Clean(b)
 }
 
 func pathWithin(path, root string) bool {
@@ -125,29 +135,39 @@ func pathWithinOrEqual(path, root string) bool {
 	return path == root || pathWithin(path, root)
 }
 
-func canonicalProjectRoot(worktreeRoot, commonGitDir string) string {
-	commonGitDir = filepath.Clean(commonGitDir)
-	if filepath.Base(commonGitDir) == ".git" {
-		return filepath.Dir(commonGitDir)
-	}
-	return filepath.Clean(worktreeRoot)
-}
-
-func gitOutput(ctx context.Context, dir string, args ...string) (string, error) {
+func gitBytes(ctx context.Context, dir string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("%s (%w)", strings.TrimSpace(string(out)), err)
+	// Git environment overrides can redirect -C to a different repository. Only
+	// cwd and Git's on-disk records are allowed to establish context identity.
+	for _, entry := range os.Environ() {
+		if !strings.HasPrefix(entry, "GIT_") {
+			cmd.Env = append(cmd.Env, entry)
+		}
 	}
-	result := strings.TrimSpace(string(out))
+	out, err := cmd.Output()
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if err != nil {
+		return nil, fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+	}
+	return out, nil
+}
+func gitOutput(ctx context.Context, dir string, args ...string) (string, error) {
+	out, err := gitBytes(ctx, dir, args...)
+	if err != nil {
+		return "", err
+	}
+	// Remove only Git's record terminator: whitespace is legal in path names.
+	result := strings.TrimSuffix(string(out), "\n")
 	if result == "" {
 		return "", fmt.Errorf("empty git output")
 	}
-	return filepath.Clean(result), nil
+	return result, nil
 }
 
 func validKey(key string) bool {
-	if filepath.IsAbs(key) || filepath.Clean(key) != key || key == "." || key == ".." || strings.HasPrefix(key, ".."+string(os.PathSeparator)) {
+	if strings.ContainsAny(key, "\r\n\x00") || filepath.IsAbs(key) || filepath.Clean(key) != key || key == "." || key == ".." || strings.HasPrefix(key, ".."+string(os.PathSeparator)) {
 		return false
 	}
 	// Legacy keys mirror real home paths, including .config and .worktrees.

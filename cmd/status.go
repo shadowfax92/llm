@@ -8,7 +8,7 @@ import (
 
 func newStatusCommand(a *app) *cobra.Command {
 	return &cobra.Command{Use: "status", Short: "Inspect the current .llm binding without writing", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
-		binding, err := a.store.Resolve(cmd.Context(), a.cwd, contextstore.ResolveOptions{Scope: contextstore.ScopeCwd})
+		binding, err := a.store.Resolve(cmd.Context(), a.cwd, contextstore.ResolveOptions{Scope: contextstore.ScopeRepo})
 		if err != nil {
 			return operationError{err}
 		}

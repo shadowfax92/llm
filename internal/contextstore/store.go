@@ -2,22 +2,20 @@ package contextstore
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 )
 
-// Store keeps the filesystem/Git dependencies local-substitutable with real
-// temporary directories and Git repos. Open and Resolve are read-only.
+// Store is the context lifecycle module. Its small interface hides local Git
+// discovery, filesystem containment and cooperating-writer coordination. Open,
+// Resolve and Projects never create files; mutations lock before re-resolving.
 type Store struct{ cfg Config }
 
 func Open(cfg Config) (*Store, error) {
-	if !filepath.IsAbs(cfg.Root) || !filepath.IsAbs(cfg.Home) || filepath.Clean(cfg.Root) == filepath.Clean(cfg.Home) {
-		return nil, &Error{Code: "invalid_input", Message: "store and home must be distinct absolute directories", NextAction: "Set --store to a dedicated context directory."}
+	if !filepath.IsAbs(cfg.Root) || !filepath.IsAbs(cfg.Home) {
+		return nil, &Error{Code: "invalid_input", Message: "store and home must be absolute directories", NextAction: "Set --store to a dedicated context directory."}
 	}
 	cfg.Root, cfg.Home = filepath.Clean(cfg.Root), filepath.Clean(cfg.Home)
-	// macOS temp/home paths can contain aliases such as /var -> /private/var.
-	// Compare cwd against the same resolved home identity before deriving a key.
 	home, err := realPath(cfg.Home)
 	if err != nil {
 		return nil, err
@@ -27,154 +25,214 @@ func Open(cfg Config) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	if root == home {
-		return nil, &Error{Code: "invalid_input", Message: "store resolves to home", NextAction: "Choose a dedicated context store directory."}
+	if pathWithinOrEqual(home, root) {
+		return nil, &Error{Code: "invalid_input", Message: "store must not be home or an ancestor of home", NextAction: "Choose a dedicated context store directory."}
 	}
 	return &Store{cfg: cfg}, nil
 }
 
-// Resolve retains the baseline cwd binding and worktree-relative auto lookup.
-// Canonical repo-root creation is deliberately unavailable in this skeleton;
-// the context implementation owner replaces this legacy identity policy.
+// Resolve honors the nearest existing binding before deriving a repo identity.
+// Missing/broken/external bindings are diagnostic states, not permission to
+// replace them. Only Ensure/Link may publish, after validating and locking.
 func (s *Store) Resolve(ctx context.Context, cwd string, opts ResolveOptions) (Binding, error) {
 	if err := ctx.Err(); err != nil {
 		return Binding{}, err
+	}
+	if opts.Scope != "" && opts.Scope != ScopeCwd && opts.Scope != ScopeRepo {
+		return Binding{}, invalidScope()
 	}
 	cwd, err := realPath(cwd)
 	if err != nil {
 		return Binding{}, err
 	}
-	b := Binding{Anchor: filepath.Join(cwd, ".llm"), State: "missing"}
-	if opts.Scope != "" && opts.Scope != ScopeCwd && opts.Scope != ScopeRepo {
-		return b, invalidScope()
+	info, err := discoverGit(ctx, cwd)
+	if err != nil {
+		return Binding{}, err
 	}
-	info, err := os.Lstat(b.Anchor)
-	if err == nil {
-		switch {
-		case info.Mode()&os.ModeSymlink != 0:
-			target, err := os.Readlink(b.Anchor)
-			if err != nil {
-				return b, err
+	b := Binding{Anchor: filepath.Join(cwd, ".llm"), WorktreeRoot: info.worktree, CanonicalRoot: info.canonical, CommonGitDir: info.common, State: "missing"}
+	if opts.Scope != ScopeCwd {
+		limit := info.worktree
+		if limit == "" {
+			limit = s.cfg.Home
+			if !pathWithinOrEqual(cwd, limit) {
+				limit = string(filepath.Separator)
 			}
-			if !filepath.IsAbs(target) {
-				target = filepath.Join(cwd, target)
-			}
-			if targetInfo, err := os.Stat(target); os.IsNotExist(err) {
-				b.State = "dangling"
-				return b, nil
-			} else if err != nil {
-				return b, err
-			} else if !targetInfo.IsDir() {
-				b.State = "conflict"
-				return b, &Error{Code: "conflict", Message: ".llm target is not a directory", NextAction: "Preserve the target and choose a managed project directory."}
-			}
-			key, err := s.managedKey(target)
-			if err != nil {
-				b.State = "conflict"
-				return b, err
-			}
-			b.Project = Project{Key: key, Root: filepath.Join(s.cfg.Root, key)}
-			b.State = "managed"
-			return b, nil
-		case info.IsDir():
-			b.State = "local"
-		default:
-			b.State = "conflict"
 		}
-	} else if !os.IsNotExist(err) {
-		return b, err
+		for dir := cwd; ; dir = filepath.Dir(dir) {
+			if dir != s.cfg.Home {
+				candidate := b
+				candidate.Anchor = filepath.Join(dir, ".llm")
+				if err := s.inspect(&candidate); err != nil {
+					return candidate, err
+				}
+				if candidate.State != "missing" {
+					return s.selectProject(candidate, opts.ProjectKey)
+				}
+			}
+			if dir == limit || dir == filepath.Dir(dir) {
+				break
+			}
+		}
+		if info.worktree != "" {
+			b.Anchor = filepath.Join(info.worktree, ".llm")
+		}
+	} else {
+		if err := s.inspect(&b); err != nil {
+			return b, err
+		}
+		if b.State != "missing" {
+			return s.selectProject(b, opts.ProjectKey)
+		}
 	}
 	if opts.ProjectKey != "" {
-		root, err := s.projectPath(opts.ProjectKey, false)
+		return s.selectProject(b, opts.ProjectKey)
+	}
+	identityRoot := filepath.Dir(b.Anchor)
+	if opts.Scope != ScopeCwd && info.worktree != "" {
+		// A canonical nested binding is a legacy identity, even if this worktree has
+		// no corresponding .llm. New links still belong at this worktree's repo root.
+		if info.canonicalValid {
+			rel, _ := filepath.Rel(info.worktree, cwd)
+			for dir := filepath.Join(info.canonical, rel); ; dir = filepath.Dir(dir) {
+				candidate := b
+				candidate.Anchor = filepath.Join(dir, ".llm")
+				if err := s.inspect(&candidate); err != nil {
+					return b, err
+				}
+				if candidate.State == "managed" {
+					b.Project = candidate.Project
+					return b, nil
+				}
+				if candidate.State != "missing" {
+					return b, conflict("canonical .llm needs resolution at " + candidate.Anchor)
+				}
+				if dir == info.canonical {
+					break
+				}
+			}
+		} else {
+			return b, ambiguousIdentity()
+		}
+		identityRoot = info.canonical
+	}
+	if rel, err := filepath.Rel(s.cfg.Home, identityRoot); err == nil && validKey(rel) {
+		root, err := s.projectPath(rel, false)
 		if err != nil {
 			return b, err
 		}
-		b.Project = Project{Key: opts.ProjectKey, Root: root}
-	} else if opts.Scope == ScopeRepo {
-		key, err := s.resolveAutoLinkProject(ctx, cwd)
-		if err != nil {
-			return b, err
-		}
-		b.Project = Project{Key: key, Root: filepath.Join(s.cfg.Root, key)}
-	} else if rel, err := filepath.Rel(s.cfg.Home, cwd); err == nil && validKey(rel) {
-		b.Project = Project{Key: rel, Root: filepath.Join(s.cfg.Root, rel)}
+		b.Project = Project{Key: rel, Root: root}
 	}
 	return b, nil
 }
 
-// Ensure preserves explicit cwd initialization, including migration. Repo scope
-// must not silently create a second store while canonical identity is unfinished.
-func (s *Store) Ensure(ctx context.Context, cwd string, opts ResolveOptions) (LinkResult, error) {
-	result := LinkResult{Added: []Change{}, Conflicts: []Change{}, Warnings: []string{}}
-	if err := ctx.Err(); err != nil {
-		return result, err
+func (s *Store) inspect(b *Binding) error {
+	info, err := os.Lstat(b.Anchor)
+	if os.IsNotExist(err) {
+		return nil
 	}
-	if opts.Scope == "" || opts.Scope == ScopeRepo {
-		return result, unavailable("canonical automatic initialization")
-	}
-	if opts.Scope != ScopeCwd {
-		return result, invalidScope()
-	}
-	anchorRoot, err := realPath(cwd)
 	if err != nil {
-		return result, err
+		return err
 	}
-	storeRoot, err := resolveParent(s.cfg.Root)
-	if err != nil {
-		return result, err
-	}
-	if anchorRoot == s.cfg.Home || pathWithinOrEqual(anchorRoot, storeRoot) {
-		return result, &Error{Code: "invalid_input", Message: "cannot initialize home or a directory inside the context store", NextAction: "Run init in the source project directory."}
-	}
-	b, err := s.Resolve(ctx, cwd, opts)
-	result.Binding = b
-	if err != nil {
-		return result, err
-	}
-	if b.State == "managed" {
-		if opts.ProjectKey != "" && opts.ProjectKey != b.Project.Key {
-			return result, &Error{Code: "conflict", Message: ".llm is already bound to a different project", NextAction: "Use dotllm link <project> to change the binding."}
+	switch {
+	case info.Mode()&os.ModeSymlink != 0:
+		target, err := os.Readlink(b.Anchor)
+		if err != nil {
+			return err
 		}
-		return result, nil
-	}
-	if b.State == "dangling" || b.State == "conflict" {
-		return result, &Error{Code: "conflict", Message: "existing .llm binding needs manual resolution", NextAction: "Inspect .llm, then use dotllm link <project>."}
-	}
-	if b.Project.Key == "" {
-		return result, &Error{Code: "invalid_input", Message: "project must be a dedicated directory under home", NextAction: "Use an explicit --project and --scope cwd."}
-	}
-	centralPath, err := s.projectPath(b.Project.Key, false)
-	if err != nil {
-		return result, err
-	}
-	if b.State == "local" {
-		if _, err := os.Lstat(centralPath); !os.IsNotExist(err) {
-			return result, &Error{Code: "conflict", Message: "central path already exists; local .llm preserved", NextAction: "Use dotllm link <project> to merge existing context."}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(b.Anchor), target)
 		}
-		if err := os.MkdirAll(filepath.Dir(centralPath), 0755); err != nil {
-			return result, err
+		targetInfo, err := os.Stat(target)
+		if os.IsNotExist(err) {
+			root, e := resolveParent(s.cfg.Root)
+			resolved, targetErr := resolveParent(target)
+			rel, relErr := filepath.Rel(root, resolved)
+			if e != nil || targetErr != nil || relErr != nil || !validKey(rel) {
+				b.State = "external"
+			} else {
+				b.State = "dangling"
+			}
+			return nil
 		}
-		if err := os.Rename(b.Anchor, centralPath); err != nil {
-			return result, fmt.Errorf("migrate .llm: %w", err)
+		if err != nil {
+			return err
 		}
-	} else if err := os.MkdirAll(centralPath, 0755); err != nil {
-		return result, err
+		if !targetInfo.IsDir() {
+			b.State = "conflict"
+			return nil
+		}
+		key, err := s.managedKey(target)
+		if err != nil {
+			b.State = "external"
+			return nil
+		}
+		b.Project = Project{Key: key, Root: filepath.Join(s.cfg.Root, key)}
+		b.State = "managed"
+	case info.IsDir():
+		b.State = "local"
+	default:
+		b.State = "conflict"
 	}
-	if err := os.Symlink(centralPath, b.Anchor); err != nil {
-		return result, fmt.Errorf("create symlink: %w", err)
-	}
-	result.Changed = true
-	result.Binding.State = "managed"
-	s.copyTemplates(centralPath, &result)
-	if err := s.addToRegistry(b.Project.Key); err != nil {
-		return result, fmt.Errorf("update registry (link already published): %w", err)
-	}
-	return result, nil
+	return nil
 }
 
-func unavailable(feature string) error {
-	return &Error{Code: "unavailable", Message: feature + " is unavailable in the skeleton", NextAction: "Use existing explicit cwd init/link operations or wait for the implementation slice."}
+func (s *Store) selectProject(b Binding, key string) (Binding, error) {
+	if key == "" {
+		return b, nil
+	}
+	root, err := s.projectPath(key, false)
+	if err != nil {
+		return b, err
+	}
+	if b.State == "managed" && !sameResolvedPath(root, b.Project.Root) {
+		return b, conflict(".llm is already bound to a different project; use dotllm link <project>")
+	}
+	b.Project = Project{Key: key, Root: root}
+	return b, nil
+}
+
+// Ensure creates at repo scope by default; explicit cwd scope is the opt-in for
+// non-Git/nested projects. Existing nested bindings keep their original identity.
+func (s *Store) Ensure(ctx context.Context, cwd string, opts ResolveOptions) (LinkResult, error) {
+	b, err := s.Resolve(ctx, cwd, opts)
+	if err != nil {
+		return emptyResult(b), err
+	}
+	if b.State == "missing" && opts.Scope != ScopeCwd && b.WorktreeRoot == "" {
+		return emptyResult(b), ambiguousIdentity()
+	}
+	if b.Project.Key == "" {
+		// Real directories need a derived identity too; inspection deliberately does
+		// not interpret their contents as a managed project before migration.
+		identity := filepath.Dir(b.Anchor)
+		if opts.Scope != ScopeCwd && b.CanonicalRoot != "" {
+			identity = b.CanonicalRoot
+		}
+		rel, e := filepath.Rel(s.cfg.Home, identity)
+		if e != nil || !validKey(rel) {
+			return emptyResult(b), &Error{Code: "selector_required", Message: "cannot derive a project key", NextAction: "Use init --project <key> (and --scope cwd outside Git)."}
+		}
+		root, e := s.projectPath(rel, false)
+		if e != nil {
+			return emptyResult(b), e
+		}
+		b.Project = Project{Key: rel, Root: root}
+	}
+	if b.State != "managed" && b.State != "local" && b.State != "missing" {
+		return emptyResult(b), conflict("existing .llm binding needs resolution at " + b.Anchor)
+	}
+	return s.mutate(ctx, cwd, opts, b, true)
+}
+
+func emptyResult(b Binding) LinkResult {
+	return LinkResult{Binding: b, Added: []Change{}, Conflicts: []Change{}, Warnings: []string{}}
 }
 func invalidScope() error {
 	return &Error{Code: "invalid_input", Message: "scope must be repo or cwd", NextAction: "Use --scope repo or --scope cwd."}
+}
+func conflict(message string) error {
+	return &Error{Code: "conflict", Message: message, NextAction: "Inspect .llm and any .llm.bak; preserve their contents before retrying."}
+}
+func ambiguousIdentity() error {
+	return &Error{Code: "identity_ambiguous", Message: "no valid canonical Git checkout or existing binding", NextAction: "Use dotllm link <project>, or init --scope cwd --project <key> for an explicit directory."}
 }
