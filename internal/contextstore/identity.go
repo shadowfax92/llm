@@ -140,7 +140,9 @@ func pathWithinOrEqual(path, root string) bool {
 	return path == root || pathWithin(path, root)
 }
 
-func gitBytes(ctx context.Context, dir string, args ...string) ([]byte, error) {
+// gitCommand shares the environment policy with NUL-delimited stdin queries
+// used by local exclusion management; neither path may redirect Git identity.
+func gitCommand(ctx context.Context, dir string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
 	// Git environment overrides can redirect -C to a different repository. Only
 	// cwd and Git's on-disk records are allowed to establish context identity.
@@ -149,6 +151,11 @@ func gitBytes(ctx context.Context, dir string, args ...string) ([]byte, error) {
 			cmd.Env = append(cmd.Env, entry)
 		}
 	}
+	return cmd
+}
+
+func gitBytes(ctx context.Context, dir string, args ...string) ([]byte, error) {
+	cmd := gitCommand(ctx, dir, args...)
 	out, err := cmd.Output()
 	if ctx.Err() != nil {
 		return nil, ctx.Err()

@@ -92,6 +92,8 @@ Existing exclusions and tracked `.gitignore` files are preserved. Read-only
 commands never update metadata. Git-tracked `.llm` content cannot be ignored:
 dotllm refuses to migrate or relink it until you deliberately preserve the data
 and remove those entries from Git's index.
+If higher-priority `.gitignore` negations prevent the exclusions, linking stops
+with guidance to inspect those rules; dotllm leaves the tracked rules intact.
 
 ## When `.llm` already exists
 

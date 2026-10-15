@@ -235,3 +235,79 @@ func TestResolveDoesNotRepairGitExclusions(t *testing.T) {
 		}
 	}
 }
+
+func TestTrackedCaseAliasCannotBeMigrated(t *testing.T) {
+	home := t.TempDir()
+	repo := filepath.Join(home, "repo")
+	initGitRepo(t, repo)
+	runGit(t, repo, "config", "core.excludesFile", os.DevNull)
+	alias := filepath.Join(repo, ".LLM")
+	if err := os.Mkdir(alias, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(alias, "notes.md"), "tracked alias bytes")
+	actual, err := os.Stat(filepath.Join(repo, ".llm"))
+	aliasInfo, _ := os.Stat(alias)
+	if err != nil || !os.SameFile(actual, aliasInfo) {
+		t.Skip("fixture requires case-insensitive filesystem")
+	}
+	runGit(t, repo, "add", "--", ".LLM")
+	// Even a manually overridden Git setting cannot authorize replacing a
+	// differently-spelled index path that aliases the actual source directory.
+	runGit(t, repo, "config", "core.ignorecase", "false")
+	s := testStore(t, home)
+	_, err = s.Ensure(context.Background(), repo, ResolveOptions{})
+	var domain *Error
+	if !errors.As(err, &domain) || domain.Code != "conflict" {
+		t.Fatalf("tracked alias adopted: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(alias, "notes.md"))
+	if err != nil || string(data) != "tracked alias bytes" {
+		t.Fatalf("tracked alias changed: %q %v", data, err)
+	}
+	if _, err := os.Lstat(filepath.Join(repo, ".llm.bak")); !os.IsNotExist(err) {
+		t.Fatalf("tracked alias migrated: %v", err)
+	}
+}
+
+func TestEnsureRespectsEffectiveGitIgnoreRules(t *testing.T) {
+	for _, higherPriority := range []bool{false, true} {
+		t.Run(fmt.Sprint(higherPriority), func(t *testing.T) {
+			home := t.TempDir()
+			repo := filepath.Join(home, "repo")
+			initGitRepo(t, repo)
+			runGit(t, repo, "config", "core.excludesFile", os.DevNull)
+			exclude := filepath.Join(repo, ".git", "info", "exclude")
+			original := "/.llm\n/.dotllm.lock\n!/.llm\n!/.dotllm.lock\n"
+			writeTestFile(t, exclude, original)
+			if higherPriority {
+				writeTestFile(t, filepath.Join(repo, ".gitignore"), "!/.llm\n!/.dotllm.lock\n")
+				runGit(t, repo, "add", ".gitignore")
+			}
+			s := testStore(t, home)
+			_, err := s.Ensure(context.Background(), repo, ResolveOptions{})
+			if higherPriority {
+				var domain *Error
+				if !errors.As(err, &domain) || domain.Code != "conflict" || !strings.Contains(domain.NextAction, ".gitignore") {
+					t.Fatalf("expected actionable ignore conflict: %v", err)
+				}
+				if _, err := os.Lstat(filepath.Join(repo, ".llm")); !os.IsNotExist(err) {
+					t.Fatalf("published despite ignore conflict: %v", err)
+				}
+				data, _ := os.ReadFile(filepath.Join(repo, ".gitignore"))
+				if string(data) != "!/.llm\n!/.dotllm.lock\n" {
+					t.Fatalf("tracked rules rewritten: %q", data)
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				assertGitClean(t, repo)
+			}
+			data, _ := os.ReadFile(exclude)
+			if !strings.HasPrefix(string(data), original) {
+				t.Fatalf("original rules changed: %q", data)
+			}
+		})
+	}
+}

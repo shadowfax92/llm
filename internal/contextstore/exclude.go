@@ -3,8 +3,10 @@ package contextstore
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -36,16 +38,72 @@ func checkTrackedContext(ctx context.Context, b Binding) error {
 	}
 	args := []string{"ls-files", "--cached", "-z", "--"}
 	for _, path := range paths {
-		args = append(args, ":(top,literal)"+path)
+		args = append(args, ":(top,literal,icase)"+path)
 	}
 	tracked, err := gitBytes(ctx, b.WorktreeRoot, args...)
 	if err != nil {
 		return err
 	}
-	if len(tracked) != 0 {
-		return &Error{Code: "conflict", Message: fmt.Sprintf("Git tracks context or lock content at %s; refusing to change it", b.Anchor), NextAction: "Preserve the tracked content and deliberately remove it from Git's index before using dotllm here; local exclusions cannot hide tracked files."}
+	if len(tracked) == 0 {
+		return nil
+	}
+	// Git pathspecs are case-sensitive even on macOS. Query possible aliases,
+	// then distinguish actual filesystem aliases from unrelated case-sensitive
+	// names. core.ignorecase also protects deleted/sparse index entries.
+	ignoreCase, _ := gitOutput(ctx, b.WorktreeRoot, "config", "--bool", "--get", "core.ignorecase")
+	for _, entry := range bytes.Split(tracked, []byte{0}) {
+		if len(entry) == 0 {
+			continue
+		}
+		parts := strings.Split(string(entry), "/")
+		for _, path := range paths {
+			depth := len(strings.Split(path, "/"))
+			if len(parts) < depth {
+				continue
+			}
+			candidate := strings.Join(parts[:depth], "/")
+			if !strings.EqualFold(candidate, path) {
+				continue
+			}
+			actualInfo, actualErr := os.Lstat(filepath.Join(b.WorktreeRoot, filepath.FromSlash(path)))
+			candidateInfo, candidateErr := os.Lstat(filepath.Join(b.WorktreeRoot, filepath.FromSlash(candidate)))
+			if candidate != path && ignoreCase != "true" && (actualErr != nil || candidateErr != nil || !os.SameFile(actualInfo, candidateInfo)) {
+				continue
+			}
+			return &Error{Code: "conflict", Message: fmt.Sprintf("Git tracks context or lock content at %s; refusing to change it", b.Anchor), NextAction: "Preserve the tracked content and deliberately remove it from Git's index before using dotllm here; local exclusions cannot hide tracked files."}
+		}
 	}
 	return nil
+}
+
+// Ask Git to evaluate its precedence rules instead of copying its matcher.
+// NUL records preserve tabs/backslashes in paths and patterns; --no-index
+// checks the prospective anchor even before its symlink has been published.
+func ignoredGitContext(ctx context.Context, b Binding, paths []string) (bool, error) {
+	cmd := gitCommand(ctx, b.WorktreeRoot, "check-ignore", "--verbose", "--non-matching", "--no-index", "-z", "--stdin")
+	cmd.Stdin = strings.NewReader(strings.Join(paths, "\x00") + "\x00")
+	out, err := cmd.Output()
+	if ctx.Err() != nil {
+		return false, ctx.Err()
+	}
+	var exit *exec.ExitError
+	if err != nil && (!errors.As(err, &exit) || exit.ExitCode() != 1) {
+		return false, fmt.Errorf("git check-ignore: %w", err)
+	}
+	fields := bytes.Split(out, []byte{0})
+	if len(fields) != 4*len(paths)+1 {
+		return false, fmt.Errorf("unexpected Git exclusion response")
+	}
+	for i, path := range paths {
+		pattern := fields[4*i+2]
+		if string(fields[4*i+3]) != path {
+			return false, fmt.Errorf("unexpected Git exclusion path")
+		}
+		if len(pattern) == 0 || pattern[0] == '!' {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // A Git-style exclusive lockfile serializes read/append/rename across different
@@ -105,6 +163,10 @@ func excludeGitContext(ctx context.Context, b Binding) error {
 			_ = root.Remove("info/exclude.lock")
 		}
 	}()
+	ignored, err := ignoredGitContext(ctx, b, paths)
+	if err != nil || ignored {
+		return err
+	}
 	var original []byte
 	info, err = root.Lstat("info/exclude")
 	if err == nil {
@@ -126,24 +188,11 @@ func excludeGitContext(ctx context.Context, b Binding) error {
 		// A leading slash anchors to each worktree's root; no trailing slash,
 		// because .llm is a symlink. Quote glob syntax and whitespace literally.
 		pattern := "/" + strings.NewReplacer("\\", "\\\\", "*", "\\*", "?", "\\?", "[", "\\[", "]", "\\]", " ", "\\ ", "\t", "\\\t").Replace(path)
-		found := false
-		for _, line := range bytes.Split(updated, []byte("\n")) {
-			if string(bytes.TrimSuffix(line, []byte("\r"))) == pattern {
-				found = true
-				break
-			}
-		}
-		if found {
-			continue
-		}
 		if len(updated) > 0 && updated[len(updated)-1] != '\n' {
 			updated = append(updated, '\n')
 		}
 		updated = append(updated, pattern...)
 		updated = append(updated, '\n')
-	}
-	if bytes.Equal(original, updated) {
-		return nil
 	}
 	if _, err := lock.Write(updated); err != nil {
 		return err
@@ -161,5 +210,12 @@ func excludeGitContext(ctx context.Context, b Binding) error {
 		return err
 	}
 	published = true
+	ignored, err = ignoredGitContext(ctx, b, paths)
+	if err != nil {
+		return err
+	}
+	if !ignored {
+		return &Error{Code: "conflict", Message: "Git rules prevent local context exclusions at " + b.Anchor, NextAction: "Inspect .gitignore negations with git check-ignore -v --no-index; deliberately adjust the higher-priority rules before retrying. dotllm will not edit tracked ignore files."}
+	}
 	return nil
 }
