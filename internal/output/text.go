@@ -634,11 +634,13 @@ func (r *renderer) plan(command string, p archive.Plan) {
 		meta += " · last modified before " + r.when(p.Cutoff)
 	}
 	r.line(r.style.paint(muted, meta))
-	// Only flags the commands define today: archive saves plans with
-	// --plan-out; restore has no plan-saving flag yet, so its guidance stops
-	// at applying a saved plan rather than inventing one.
+	// Both commands save exact plans. Retain the caller's selectors: the restore
+	// plan ID is a new operation ID, not the parent archive's --archive selector.
 	if op == "restore" {
-		r.next("next", []next{{"dotllm restore --apply --plan <file>", "apply only what a saved restore plan lists"}})
+		r.next("next", []next{
+			{"dotllm restore <same arguments> --plan-out <file>", "save this exact plan for review"},
+			{"dotllm restore --apply --plan <file>", "then apply only what that file lists"},
+		})
 		return
 	}
 	r.next("next", []next{
