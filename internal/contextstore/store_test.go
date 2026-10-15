@@ -1,6 +1,7 @@
-package cmd
+package contextstore
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,7 +21,8 @@ func TestResolveAutoLinkProjectUsesCommonGitDirForWorktree(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	project, err := resolveAutoLinkProject(nested, home)
+	binding, err := testStore(t, home).Resolve(context.Background(), nested, ResolveOptions{Scope: ScopeRepo})
+	project := binding.Project.Key
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +52,8 @@ func TestResolveAutoLinkProjectUsesCanonicalCheckoutLink(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	project, err := resolveAutoLinkProject(nested, home)
+	binding, err := testStore(t, home).Resolve(context.Background(), nested, ResolveOptions{Scope: ScopeRepo})
+	project := binding.Project.Key
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +74,8 @@ func TestResolveAutoLinkProjectUsesCurrentRootForPrimaryCheckout(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	project, err := resolveAutoLinkProject(nested, home)
+	binding, err := testStore(t, home).Resolve(context.Background(), nested, ResolveOptions{Scope: ScopeRepo})
+	project := binding.Project.Key
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +89,7 @@ func TestResolveAutoLinkProjectUsesCurrentRootForPrimaryCheckout(t *testing.T) {
 func TestResolveAutoLinkProjectRequiresGitRepo(t *testing.T) {
 	home := t.TempDir()
 
-	_, err := resolveAutoLinkProject(home, home)
+	_, err := testStore(t, home).Resolve(context.Background(), home, ResolveOptions{Scope: ScopeRepo})
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -111,10 +115,9 @@ func TestLinkRunMergesExistingSymlinkTargetBeforeRelinking(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	restore := useTestHome(t, home, cwd)
-	defer restore()
+	store := testStore(t, home)
 
-	if err := linkRun(linkCmd, []string{newProject}); err != nil {
+	if _, err := store.Link(context.Background(), cwd, newProject, ScopeCwd); err != nil {
 		t.Fatal(err)
 	}
 
@@ -147,10 +150,9 @@ func TestLinkRunRejectsMergeIntoDescendantTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	restore := useTestHome(t, home, cwd)
-	defer restore()
+	store := testStore(t, home)
 
-	err := linkRun(linkCmd, []string{newProject})
+	_, err := store.Link(context.Background(), cwd, newProject, ScopeCwd)
 	if err == nil {
 		t.Fatal("expected descendant merge to fail")
 	}
@@ -194,29 +196,13 @@ func runGit(t *testing.T, dir string, args ...string) {
 	}
 }
 
-func useTestHome(t *testing.T, home, cwd string) func() {
+func testStore(t *testing.T, home string) *Store {
 	t.Helper()
-	oldHome := homeDir
-	oldRoot := llmRoot
-	oldLinkAuto := linkAuto
-	oldCwd, err := os.Getwd()
+	s, err := Open(Config{Home: home, Root: filepath.Join(home, "llm")})
 	if err != nil {
 		t.Fatal(err)
 	}
-	homeDir = home
-	llmRoot = filepath.Join(home, "llm")
-	linkAuto = false
-	if err := os.Chdir(cwd); err != nil {
-		t.Fatal(err)
-	}
-	return func() {
-		homeDir = oldHome
-		llmRoot = oldRoot
-		linkAuto = oldLinkAuto
-		if err := os.Chdir(oldCwd); err != nil {
-			t.Fatal(err)
-		}
-	}
+	return s
 }
 
 func writeTestFile(t *testing.T, path, content string) {
@@ -234,5 +220,99 @@ func assertFileContent(t *testing.T, path, want string) {
 	}
 	if string(content) != want {
 		t.Fatalf("%s = %q, want %q", path, content, want)
+	}
+}
+
+func TestRelativeBindingIsIdempotentAndTraversalIsRejected(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "checkout")
+	target := filepath.Join(home, "llm", "code", "project")
+	for _, dir := range []string{cwd, target} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	relative, err := filepath.Rel(cwd, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(relative, filepath.Join(cwd, ".llm")); err != nil {
+		t.Fatal(err)
+	}
+	store := testStore(t, home)
+	result, err := store.Link(context.Background(), cwd, filepath.Join("code", "project"), ScopeCwd)
+	if err != nil || result.Changed {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	for _, key := range []string{"..", "../escape", ".", "/tmp/outside", ".projects", "templates"} {
+		if _, err := store.Link(context.Background(), cwd, key, ScopeCwd); err == nil {
+			t.Fatalf("accepted invalid key %q", key)
+		}
+	}
+}
+
+func TestLinkPreservesBackupAndDoesNotFollowDestinationSymlink(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "checkout")
+	target := filepath.Join(home, "llm", "project")
+	outside := filepath.Join(home, "outside")
+	for _, dir := range []string{filepath.Join(cwd, ".llm", "nested"), target, outside} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeTestFile(t, filepath.Join(cwd, ".llm", "nested", "private.md"), "private")
+	if err := os.Symlink(outside, filepath.Join(target, "nested")); err != nil {
+		t.Fatal(err)
+	}
+	result, err := testStore(t, home).Link(context.Background(), cwd, "project", ScopeCwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Conflicts) != 1 {
+		t.Fatalf("conflicts=%+v", result.Conflicts)
+	}
+	assertFileContent(t, filepath.Join(cwd, ".llm.bak", "nested", "private.md"), "private")
+	if _, err := os.Lstat(filepath.Join(outside, "private.md")); !os.IsNotExist(err) {
+		t.Fatalf("followed destination symlink: %v", err)
+	}
+}
+
+func TestCanonicalEnsureFailsWithoutCreatingDirectories(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	if err := os.MkdirAll(cwd, 0755); err != nil {
+		t.Fatal(err)
+	}
+	_, err := testStore(t, home).Ensure(context.Background(), cwd, ResolveOptions{})
+	if err == nil {
+		t.Fatal("canonical stub claimed success")
+	}
+	if _, err := os.Lstat(filepath.Join(home, "llm")); !os.IsNotExist(err) {
+		t.Fatalf("stub mutated store: %v", err)
+	}
+}
+
+func TestEnsureRejectsStoreAndHomeAnchorsAndDifferentExplicitProject(t *testing.T) {
+	home := t.TempDir()
+	store := testStore(t, home)
+	root := filepath.Join(home, "llm")
+	if err := os.MkdirAll(root, 0755); err != nil {
+		t.Fatal(err)
+	}
+	for _, cwd := range []string{home, root} {
+		if _, err := store.Ensure(context.Background(), cwd, ResolveOptions{Scope: ScopeCwd, ProjectKey: "project"}); err == nil {
+			t.Fatalf("initialized forbidden anchor %s", cwd)
+		}
+	}
+	cwd := filepath.Join(home, "checkout")
+	if err := os.MkdirAll(cwd, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Ensure(context.Background(), cwd, ResolveOptions{Scope: ScopeCwd, ProjectKey: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Ensure(context.Background(), cwd, ResolveOptions{Scope: ScopeCwd, ProjectKey: "second"}); err == nil {
+		t.Fatal("explicit project silently ignored")
 	}
 }
