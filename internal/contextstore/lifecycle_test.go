@@ -237,3 +237,102 @@ func TestMissingAnchorWithBackupRequiresRecovery(t *testing.T) {
 		t.Fatalf("published link: %v", err)
 	}
 }
+
+func TestTemplatesAreCopiedWithoutClobberingExistingContext(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "checkout")
+	root := filepath.Join(home, "llm")
+	for _, path := range []string{cwd, filepath.Join(root, "templates"), filepath.Join(root, "chosen")} {
+		if err := os.MkdirAll(path, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeTestFile(t, filepath.Join(root, "templates", "new.md"), "template")
+	writeTestFile(t, filepath.Join(root, "templates", "existing.md"), "template default")
+	writeTestFile(t, filepath.Join(root, "chosen", "existing.md"), "personal")
+	s := testStore(t, home)
+	result, err := s.Ensure(context.Background(), cwd, ResolveOptions{Scope: ScopeCwd, ProjectKey: "chosen"})
+	if err != nil || len(result.Warnings) != 0 {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	assertFileContent(t, filepath.Join(root, "chosen", "new.md"), "template")
+	assertFileContent(t, filepath.Join(root, "chosen", "existing.md"), "personal")
+	again, err := s.Ensure(context.Background(), cwd, ResolveOptions{Scope: ScopeCwd})
+	if err != nil || again.Changed {
+		t.Fatalf("repeat=%+v err=%v", again, err)
+	}
+}
+
+func TestWaitingEnsureUsesCanonicalBindingObservedUnderLock(t *testing.T) {
+	home := t.TempDir()
+	primary := filepath.Join(home, "code", "repo")
+	linked := filepath.Join(home, "trees", "linked")
+	initGitRepo(t, primary)
+	runGit(t, primary, "worktree", "add", "--detach", linked)
+	root := filepath.Join(home, "llm")
+	if err := os.MkdirAll(filepath.Join(root, ".dotllm"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	anchorLock, err := os.OpenFile(filepath.Join(linked, ".dotllm.lock"), os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer anchorLock.Close()
+	if err := syscall.Flock(int(anchorLock.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.Flock(int(anchorLock.Fd()), syscall.LOCK_UN)
+	type outcome struct {
+		result LinkResult
+		err    error
+	}
+	finished := make(chan outcome, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	s := testStore(t, home)
+	go func() { result, err := s.Ensure(ctx, linked, ResolveOptions{}); finished <- outcome{result, err} }()
+	// Hold the anchor externally so Ensure must wait after its initial Resolve.
+	// Observe its store lock, publish a new canonical binding, then release it.
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+	tick := time.NewTicker(5 * time.Millisecond)
+	defer tick.Stop()
+	waiting := false
+	for !waiting {
+		select {
+		case <-deadline.C:
+			t.Fatal("writer never reached lock")
+		case <-tick.C:
+		}
+		file, err := os.OpenFile(filepath.Join(root, ".dotllm", "context.lock"), os.O_RDWR, 0)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		waiting = errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN)
+		if err == nil {
+			_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		}
+		file.Close()
+	}
+	chosen := filepath.Join(root, "chosen")
+	if err := os.Mkdir(chosen, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(chosen, filepath.Join(primary, ".llm")); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Flock(int(anchorLock.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatal(err)
+	}
+	got := <-finished
+	if got.err != nil || got.result.Binding.Project.Key != "chosen" {
+		t.Fatalf("stale selection=%+v err=%v", got.result, got.err)
+	}
+	if !sameResolvedPath(filepath.Join(linked, ".llm"), chosen) {
+		t.Fatal("linked worktree forked canonical context")
+	}
+}

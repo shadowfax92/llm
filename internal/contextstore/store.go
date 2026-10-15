@@ -68,6 +68,12 @@ func (s *Store) Resolve(ctx context.Context, cwd string, opts ResolveOptions) (B
 				if err := s.inspect(&candidate); err != nil {
 					return candidate, err
 				}
+				if candidate.State == "local" {
+					// A local directory is a source to preserve, not a durable project
+					// identity. Continue canonical resolution before choosing its target.
+					b = candidate
+					break
+				}
 				if candidate.State != "missing" {
 					return s.selectProject(candidate, opts.ProjectKey)
 				}
@@ -76,7 +82,7 @@ func (s *Store) Resolve(ctx context.Context, cwd string, opts ResolveOptions) (B
 				break
 			}
 		}
-		if info.worktree != "" {
+		if info.worktree != "" && b.State == "missing" {
 			b.Anchor = filepath.Join(info.worktree, ".llm")
 		}
 	} else {
@@ -88,6 +94,13 @@ func (s *Store) Resolve(ctx context.Context, cwd string, opts ResolveOptions) (B
 		}
 	}
 	if opts.ProjectKey != "" {
+		// A selector may rescue an ambiguous Git layout only by naming an existing
+		// target. Creating a new project still needs validated identity or cwd scope.
+		if opts.Scope != ScopeCwd && info.common != "" && !info.canonicalValid {
+			if _, err := s.projectPath(opts.ProjectKey, true); err != nil {
+				return b, err
+			}
+		}
 		return s.selectProject(b, opts.ProjectKey)
 	}
 	identityRoot := filepath.Dir(b.Anchor)
@@ -109,7 +122,7 @@ func (s *Store) Resolve(ctx context.Context, cwd string, opts ResolveOptions) (B
 					b.Project = candidate.Project
 					return b, nil
 				}
-				if candidate.State != "missing" {
+				if candidate.State != "missing" && candidate.Anchor != b.Anchor {
 					return b, conflict("canonical .llm needs resolution at " + candidate.Anchor)
 				}
 				if dir == info.canonical {
@@ -120,6 +133,10 @@ func (s *Store) Resolve(ctx context.Context, cwd string, opts ResolveOptions) (B
 			return b, ambiguousIdentity()
 		}
 		identityRoot = info.canonical
+		if b.State == "local" {
+			rel, _ := filepath.Rel(info.worktree, filepath.Dir(b.Anchor))
+			identityRoot = filepath.Join(info.canonical, rel)
+		}
 	}
 	if rel, err := filepath.Rel(s.cfg.Home, identityRoot); err == nil && validKey(rel) {
 		root, err := s.projectPath(rel, false)
@@ -132,6 +149,8 @@ func (s *Store) Resolve(ctx context.Context, cwd string, opts ResolveOptions) (B
 }
 
 func (s *Store) inspect(b *Binding) error {
+	b.State = "missing"
+	b.Project = Project{}
 	info, err := os.Lstat(b.Anchor)
 	if os.IsNotExist(err) {
 		return nil
@@ -204,8 +223,13 @@ func (s *Store) Ensure(ctx context.Context, cwd string, opts ResolveOptions) (Li
 	if err != nil {
 		return emptyResult(b), err
 	}
-	if b.State == "missing" && opts.Scope != ScopeCwd && b.WorktreeRoot == "" {
-		return emptyResult(b), ambiguousIdentity()
+	if (b.State == "missing" || b.State == "local") && opts.Scope != ScopeCwd && b.WorktreeRoot == "" {
+		if b.CommonGitDir == "" || opts.ProjectKey == "" {
+			return emptyResult(b), ambiguousIdentity()
+		}
+		if _, err := s.projectPath(opts.ProjectKey, true); err != nil {
+			return emptyResult(b), err
+		}
 	}
 	if b.Project.Key == "" {
 		// Real directories need a derived identity too; inspection deliberately does

@@ -200,3 +200,67 @@ func TestMisconfiguredWorktreeRootCannotTraverseAncestors(t *testing.T) {
 		t.Fatal("accepted cwd outside Git worktree")
 	}
 }
+
+func TestLocalDirectoryCannotBypassMissingPrimaryIdentity(t *testing.T) {
+	home := t.TempDir()
+	primary := filepath.Join(home, "code", "repo")
+	linked := filepath.Join(home, "trees", "linked")
+	initGitRepo(t, primary)
+	runGit(t, primary, "init", "--separate-git-dir", filepath.Join(home, "metadata"))
+	runGit(t, primary, "worktree", "add", "--detach", linked)
+	if err := os.Mkdir(filepath.Join(linked, ".llm"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(linked, ".llm", "keep"), "original")
+	if _, err := testStore(t, home).Ensure(context.Background(), linked, ResolveOptions{}); err == nil {
+		t.Fatal("local directory bypassed ambiguous identity")
+	}
+	assertFileContent(t, filepath.Join(linked, ".llm", "keep"), "original")
+	if _, err := os.Lstat(filepath.Join(home, "llm")); !os.IsNotExist(err) {
+		t.Fatalf("forked store: %v", err)
+	}
+}
+
+func TestAmbiguousGitSelectorMustAlreadyExist(t *testing.T) {
+	home := t.TempDir()
+	primary := filepath.Join(home, "code", "repo")
+	linked := filepath.Join(home, "trees", "linked")
+	initGitRepo(t, primary)
+	runGit(t, primary, "init", "--separate-git-dir", filepath.Join(home, "metadata"))
+	runGit(t, primary, "worktree", "add", "--detach", linked)
+	s := testStore(t, home)
+	if _, err := s.Ensure(context.Background(), linked, ResolveOptions{ProjectKey: "unregistered"}); err == nil {
+		t.Fatal("created an ambiguous project through a new selector")
+	}
+	if _, err := os.Lstat(filepath.Join(home, "llm")); !os.IsNotExist(err) {
+		t.Fatalf("created store: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, "llm", "chosen"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Ensure(context.Background(), linked, ResolveOptions{ProjectKey: "chosen"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLocalWorktreeMigrationReusesLegacyCanonicalBinding(t *testing.T) {
+	home := t.TempDir()
+	primary := filepath.Join(home, "code", "repo")
+	linked := filepath.Join(home, "trees", "linked")
+	initGitRepo(t, primary)
+	runGit(t, primary, "worktree", "add", "--detach", linked)
+	s := testStore(t, home)
+	if _, err := s.Ensure(context.Background(), primary, ResolveOptions{ProjectKey: "legacy/renamed"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(linked, ".llm"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(linked, ".llm", "keep"), "original")
+	result, err := s.Ensure(context.Background(), linked, ResolveOptions{})
+	if err != nil || result.Binding.Project.Key != "legacy/renamed" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	assertFileContent(t, filepath.Join(home, "llm", "legacy", "renamed", "keep"), "original")
+	assertFileContent(t, filepath.Join(linked, ".llm.bak", "keep"), "original")
+}

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -176,5 +177,38 @@ func TestConfigPathAndExplicitEditorRecoverMalformedConfig(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(home, "llm")); !os.IsNotExist(err) {
 		t.Fatalf("editor initialized store: %v", err)
+	}
+}
+
+func TestPathMigrationDisclosesBackupAndConflictLocations(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	t.Setenv("DOTLLM_ROOT", "")
+	repo := filepath.Join(home, "code", "repo")
+	contextRepo(t, repo)
+	local := filepath.Join(repo, ".llm")
+	target := filepath.Join(home, "llm", "code", "repo")
+	for _, path := range []string{local, target} {
+		if err := os.MkdirAll(path, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(local, "conflict.md"), []byte("original"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "conflict.md"), []byte("destination"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	code, out, errOut := contextCommand(t, home, repo, "path", "--json")
+	if code != 0 {
+		t.Fatalf("code=%d %s", code, errOut)
+	}
+	var result struct{ Warnings []string }
+	if err := json.Unmarshal(out, &result); err != nil {
+		t.Fatal(err)
+	}
+	text := []byte(strings.Join(result.Warnings, "\n"))
+	if !bytes.Contains(text, []byte(".llm.bak")) || !bytes.Contains(text, []byte("conflict.md")) {
+		t.Fatalf("hidden migration diagnostics: %s", out)
 	}
 }

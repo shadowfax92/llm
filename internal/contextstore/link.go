@@ -66,13 +66,14 @@ func (s *Store) mutate(ctx context.Context, cwd string, opts ResolveOptions, ini
 		return result, conflict("context anchor changed while waiting for its lock; retry")
 	}
 	if ensure && b.State == "managed" {
-		if initial.Project.Key != "" && !sameResolvedPath(initial.Project.Root, b.Project.Root) {
-			return result, conflict("context project changed while waiting for its lock; retry")
-		}
 		result.Binding = b
 		return result, s.addToRegistry(ctx, b.Project.Key)
 	}
-	b.Project = initial.Project
+	// Automatic identity can change while waiting (e.g. the primary gets its
+	// first explicit binding). Use the locked resolution, never the stale key.
+	if !ensure || b.Project.Key == "" {
+		b.Project = initial.Project
+	}
 	result.Binding = b
 	target, err := s.projectPath(b.Project.Key, !ensure)
 	if err != nil {
@@ -185,6 +186,14 @@ func (s *Store) mutate(ctx context.Context, cwd string, opts ResolveOptions, ini
 		if err != nil {
 			return result, err
 		}
+	}
+	// Path/root commands use a compact PathData DTO. Preserve recovery details
+	// in warnings as well as LinkResult so every command discloses migrations.
+	if result.BackupPath != "" {
+		result.Warnings = append(result.Warnings, "Original .llm preserved at "+result.BackupPath)
+	}
+	for _, entry := range result.Conflicts {
+		result.Warnings = append(result.Warnings, fmt.Sprintf("Conflict at %s; original preserved at %s", entry.Path, entry.PreservedAt))
 	}
 	if ensure {
 		s.copyTemplates(ctx, targetReal, &result)
