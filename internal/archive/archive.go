@@ -181,6 +181,9 @@ func (m *Manager) PlanRestore(ctx context.Context, archiveID string, entries []s
 		return plan, problem("invalid_input", "restore requires an archive operation")
 	}
 	result := reconcile(ctx, root, j, projects)
+	if err := ctx.Err(); err != nil {
+		return plan, err
+	}
 	wanted := map[string]bool{}
 	for _, entry := range entries {
 		if entry == "" {
@@ -393,6 +396,9 @@ func (m *Manager) Recover(ctx context.Context, id string) (Result, error) {
 	result = reconcile(ctx, root, j, projects)
 	j.Result = result
 	if err := saveJournal(root, j); err != nil {
+		return result, &ApplyError{result, errors.Join(ctx.Err(), err)}
+	}
+	if err := ctx.Err(); err != nil {
 		return result, &ApplyError{result, err}
 	}
 	if !result.Complete {
