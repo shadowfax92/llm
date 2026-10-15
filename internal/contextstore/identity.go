@@ -49,6 +49,11 @@ func discoverGit(ctx context.Context, cwd string) (id gitIdentity, err error) {
 	if err != nil {
 		return id, err
 	}
+	// core.worktree can point elsewhere. Never walk ancestors or project a
+	// relative path until Git's reported root actually contains this cwd.
+	if !pathWithinOrEqual(cwd, id.worktree) {
+		return id, ambiguousIdentity()
+	}
 	records, err := gitBytes(ctx, cwd, "worktree", "list", "--porcelain", "-z")
 	if err != nil {
 		return id, err

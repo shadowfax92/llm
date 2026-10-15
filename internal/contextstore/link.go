@@ -20,7 +20,7 @@ func isAmbiguous(err error) bool {
 // Repo scope is the default, while --scope cwd opts into a nested anchor.
 func (s *Store) Link(ctx context.Context, cwd, key string, scope Scope) (LinkResult, error) {
 	b, err := s.Resolve(ctx, cwd, ResolveOptions{Scope: scope})
-	if err != nil && !isAmbiguous(err) {
+	if err != nil && (!isAmbiguous(err) || !filepath.IsAbs(b.Anchor)) {
 		return emptyResult(b), err
 	}
 	target, err := s.projectPath(key, true)

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestEnsureCanonicalRepoFromNestedAndLinkedWorktree(t *testing.T) {
@@ -181,5 +182,21 @@ func TestBareRepoRequiresExplicitExistingProject(t *testing.T) {
 	}
 	if _, err := s.Link(context.Background(), bare, "chosen", ScopeRepo); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestMisconfiguredWorktreeRootCannotTraverseAncestors(t *testing.T) {
+	home := t.TempDir()
+	primary := filepath.Join(home, "code", "repo")
+	unrelated := filepath.Join(home, "unrelated")
+	initGitRepo(t, primary)
+	if err := os.MkdirAll(unrelated, 0755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, primary, "config", "core.worktree", unrelated)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := testStore(t, home).Ensure(ctx, primary, ResolveOptions{}); err == nil {
+		t.Fatal("accepted cwd outside Git worktree")
 	}
 }

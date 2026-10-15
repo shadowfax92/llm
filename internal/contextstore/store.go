@@ -59,6 +59,9 @@ func (s *Store) Resolve(ctx context.Context, cwd string, opts ResolveOptions) (B
 			}
 		}
 		for dir := cwd; ; dir = filepath.Dir(dir) {
+			if err := ctx.Err(); err != nil {
+				return b, err
+			}
 			if dir != s.cfg.Home {
 				candidate := b
 				candidate.Anchor = filepath.Join(dir, ".llm")
@@ -94,6 +97,9 @@ func (s *Store) Resolve(ctx context.Context, cwd string, opts ResolveOptions) (B
 		if info.canonicalValid {
 			rel, _ := filepath.Rel(info.worktree, cwd)
 			for dir := filepath.Join(info.canonical, rel); ; dir = filepath.Dir(dir) {
+				if err := ctx.Err(); err != nil {
+					return b, err
+				}
 				candidate := b
 				candidate.Anchor = filepath.Join(dir, ".llm")
 				if err := s.inspect(&candidate); err != nil {
