@@ -39,7 +39,3 @@ type Result struct {
 	Outcomes []Outcome `json:"outcomes"`
 	Complete bool      `json:"complete"`
 }
-
-// Manager's implementation owns filesystem/journal ordering, preflight and
-// cancellation. Contextstore remains the single owner of project identity.
-type Manager struct{ store *contextstore.Store }

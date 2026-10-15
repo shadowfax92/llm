@@ -45,6 +45,15 @@ func (s *Store) Link(ctx context.Context, cwd, key string, scope Scope) (LinkRes
 				result.Binding.State = "managed"
 				return result, nil
 			}
+			if _, err := os.Stat(source); os.IsNotExist(err) {
+				// Explicit relinking may repair a dangling link. There is no old
+				// content to merge, but retain its location in the result diagnostics.
+				result.Warnings = append(result.Warnings, fmt.Sprintf("Previous .llm target %s was missing; no content was copied.", source))
+				source = ""
+				break
+			} else if err != nil {
+				return result, err
+			}
 			if _, err := s.managedKey(source); err != nil {
 				return result, err
 			}
@@ -59,7 +68,21 @@ func (s *Store) Link(ctx context.Context, cwd, key string, scope Scope) (LinkRes
 			if pathWithin(srcReal, dstReal) || pathWithin(dstReal, srcReal) {
 				return result, &Error{Code: "conflict", Message: "cannot merge overlapping managed projects", NextAction: "Choose independent projects; original .llm remains in place."}
 			}
+			// Walk the validated directory, not an alias symlink: filepath.Walk
+			// deliberately does not follow a symlink at the source root.
+			source = srcReal
 		case info.IsDir():
+			srcReal, err := realPath(anchor)
+			if err != nil {
+				return result, err
+			}
+			dstReal, err := realPath(target)
+			if err != nil {
+				return result, err
+			}
+			if pathWithinOrEqual(srcReal, dstReal) || pathWithinOrEqual(dstReal, srcReal) {
+				return result, &Error{Code: "conflict", Message: "cannot merge overlapping local context and managed project", NextAction: "Choose an independent project; local .llm remains in place."}
+			}
 			backup := anchor + ".bak"
 			if _, err := os.Lstat(backup); !os.IsNotExist(err) {
 				return result, &Error{Code: "conflict", Message: ".llm.bak already exists or cannot be inspected", NextAction: "Resolve the backup before linking; no data was replaced."}

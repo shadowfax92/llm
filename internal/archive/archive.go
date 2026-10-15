@@ -5,6 +5,10 @@ import (
 	"dotllm/internal/contextstore"
 )
 
+// Manager's implementation owns filesystem/journal ordering, preflight and
+// cancellation. Contextstore remains the single owner of project identity.
+type Manager struct{ store *contextstore.Store }
+
 func New(store *contextstore.Store) *Manager { return &Manager{store: store} }
 func (m *Manager) Plan(ctx context.Context, selection Selection) (Plan, error) {
 	return Plan{}, notReady(ctx)

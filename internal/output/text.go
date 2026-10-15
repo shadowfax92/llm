@@ -16,8 +16,20 @@ func WriteText(w io.Writer, value Envelope, opts Options) error {
 		_, err := fmt.Fprintf(w, ".llm: %s\nProject: %s\nAnchor: %s\n", data.Binding.State, data.Binding.Project.Key, data.Binding.Anchor)
 		return err
 	case LinkData:
-		_, err := fmt.Fprintf(w, ".llm → %s\nChanged: %t\n", data.Binding.Project.Root, data.Changed)
-		return err
+		if _, err := fmt.Fprintf(w, ".llm → %s\nChanged: %t\n", data.Binding.Project.Root, data.Changed); err != nil {
+			return err
+		}
+		if data.BackupPath != "" {
+			if _, err := fmt.Fprintf(w, "Backup preserved at %s\n", data.BackupPath); err != nil {
+				return err
+			}
+		}
+		for _, conflict := range data.Conflicts {
+			if _, err := fmt.Fprintf(w, "Preserved %s (%s; destination %s)\n", conflict.PreservedAt, conflict.Reason, conflict.Path); err != nil {
+				return err
+			}
+		}
+		return nil
 	case ListData:
 		if len(data.Projects) == 0 {
 			_, err := fmt.Fprintln(w, "No projects. Run dotllm init in a project.")

@@ -50,7 +50,3 @@ type Error struct {
 }
 
 func (e *Error) Error() string { return e.Message }
-
-// Store keeps the filesystem/Git dependencies local-substitutable with real
-// temporary directories and Git repos. Open and Resolve are read-only.
-type Store struct{ cfg Config }

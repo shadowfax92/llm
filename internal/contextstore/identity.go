@@ -150,10 +150,12 @@ func validKey(key string) bool {
 	if filepath.IsAbs(key) || filepath.Clean(key) != key || key == "." || key == ".." || strings.HasPrefix(key, ".."+string(os.PathSeparator)) {
 		return false
 	}
-	for _, part := range strings.Split(key, string(os.PathSeparator)) {
-		if part == "" || strings.HasPrefix(part, ".") || part == "templates" || part == "runs" || part == "archive" {
-			return false
-		}
+	// Legacy keys mirror real home paths, including .config and .worktrees.
+	// Reserve store-owned roots, not ordinary names inside source project paths.
+	first := strings.Split(key, string(os.PathSeparator))[0]
+	switch first {
+	case "", ".projects", ".dotllm", "templates", "runs", "archive":
+		return false
 	}
 	return true
 }

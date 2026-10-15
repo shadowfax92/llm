@@ -316,3 +316,104 @@ func TestEnsureRejectsStoreAndHomeAnchorsAndDifferentExplicitProject(t *testing.
 		t.Fatal("explicit project silently ignored")
 	}
 }
+
+func TestLegacyRegistryKeysRemainUsableDuringInitialization(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "llm")
+	cwd := filepath.Join(home, "new")
+	for _, dir := range []string{root, cwd} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	keys := []string{".config/nvim", "code/project/.worktrees/feature", "code/project/archive", "code/templates"}
+	if err := os.WriteFile(filepath.Join(root, ".projects"), []byte(strings.Join(keys, "\n")+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	store := testStore(t, home)
+	if _, err := store.Ensure(context.Background(), cwd, ResolveOptions{Scope: ScopeCwd}); err != nil {
+		t.Fatal(err)
+	}
+	projects, err := store.Projects(context.Background())
+	if err != nil || len(projects) != len(keys)+1 {
+		t.Fatalf("projects=%+v err=%v", projects, err)
+	}
+}
+
+func TestRelinkCopiesFromResolvedManagedAlias(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "checkout")
+	root := filepath.Join(home, "llm")
+	old := filepath.Join(root, "old")
+	target := filepath.Join(root, "new")
+	for _, dir := range []string{cwd, old, target} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeTestFile(t, filepath.Join(old, "keep.md"), "keep")
+	if err := os.Symlink(old, filepath.Join(root, "alias")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(root, "alias"), filepath.Join(cwd, ".llm")); err != nil {
+		t.Fatal(err)
+	}
+	result, err := testStore(t, home).Link(context.Background(), cwd, "new", ScopeCwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Added) != 1 {
+		t.Fatalf("copied=%+v", result.Added)
+	}
+	assertFileContent(t, filepath.Join(target, "keep.md"), "keep")
+	assertFileContent(t, filepath.Join(old, "keep.md"), "keep")
+}
+
+func TestExplicitLinkRepairsMissingManagedTarget(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "checkout")
+	target := filepath.Join(home, "llm", "new")
+	for _, dir := range []string{cwd, target} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(filepath.Join(home, "llm", "missing"), filepath.Join(cwd, ".llm")); err != nil {
+		t.Fatal(err)
+	}
+	result, err := testStore(t, home).Link(context.Background(), cwd, "new", ScopeCwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Changed || len(result.Warnings) != 1 {
+		t.Fatalf("result=%+v", result)
+	}
+	resolved, err := filepath.EvalSymlinks(filepath.Join(cwd, ".llm"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved != want {
+		t.Fatalf("target=%s want=%s", resolved, want)
+	}
+}
+
+func TestLocalContextCannotMergeIntoItsOwnAncestor(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "llm", "project")
+	local := filepath.Join(cwd, ".llm")
+	if err := os.MkdirAll(local, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(local, "keep.md"), "keep")
+	if _, err := testStore(t, home).Link(context.Background(), cwd, "project", ScopeCwd); err == nil {
+		t.Fatal("accepted overlapping local migration")
+	}
+	assertFileContent(t, filepath.Join(local, "keep.md"), "keep")
+	if _, err := os.Lstat(local + ".bak"); !os.IsNotExist(err) {
+		t.Fatalf("local source moved before validation: %v", err)
+	}
+}

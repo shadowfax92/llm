@@ -7,6 +7,10 @@ import (
 	"path/filepath"
 )
 
+// Store keeps the filesystem/Git dependencies local-substitutable with real
+// temporary directories and Git repos. Open and Resolve are read-only.
+type Store struct{ cfg Config }
+
 func Open(cfg Config) (*Store, error) {
 	if !filepath.IsAbs(cfg.Root) || !filepath.IsAbs(cfg.Home) || filepath.Clean(cfg.Root) == filepath.Clean(cfg.Home) {
 		return nil, &Error{Code: "invalid_input", Message: "store and home must be distinct absolute directories", NextAction: "Set --store to a dedicated context directory."}

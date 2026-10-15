@@ -66,6 +66,7 @@ func NewRoot(deps Dependencies) *cobra.Command {
 		return a.write(cmd, "path", output.PathData{Path: result.Binding.Project.Root, Anchor: result.Binding.Anchor, Changed: result.Changed}, result.Warnings)
 	}
 	root.AddCommand(newInitCommand(a), newLinkCommand(a), newListCommand(a), newStatusCommand(a), newPathCommand(a), newConfigCommand(a), newArchiveCommand(a), newRestoreCommand(a))
+	configureHelp(root)
 	return root
 }
 func (a *app) prepare() error {
