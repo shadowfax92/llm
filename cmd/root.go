@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"dotllm/internal/archive"
 	"dotllm/internal/config"
 	"dotllm/internal/contextstore"
 	"dotllm/internal/output"
@@ -173,6 +174,12 @@ func Execute(args []string, deps Dependencies) int {
 		detail.NextAction = "Retry the cancelled command."
 		code = 130
 	}
+	// Preserve the archive module's actual progress after error classification.
+	// Rendering remains owned by output, including retained destination paths.
+	var partial interface{ PartialResult() *archive.Result }
+	if errors.As(err, &partial) {
+		detail.Partial = partial.PartialResult()
+	}
 	jsonMode, _ := root.PersistentFlags().GetBool("json")
 	// Cobra can reject a flag before parsing --json later in argv. Recognize that
 	// exact persistent flag without ever treating an argument after -- as a flag.
@@ -192,6 +199,9 @@ func Execute(args []string, deps Dependencies) int {
 	} else {
 		fmt.Fprintln(root.ErrOrStderr(), strings.TrimSpace(detail.Message))
 		fmt.Fprintln(root.ErrOrStderr(), detail.NextAction)
+		if detail.Partial != nil {
+			_ = output.WriteText(root.ErrOrStderr(), output.Envelope{Version: 1, Command: "archive", Data: output.ApplyData{Result: *detail.Partial}}, output.Options{})
+		}
 	}
 	return code
 }

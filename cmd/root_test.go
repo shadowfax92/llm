@@ -24,8 +24,8 @@ func TestCommandsKeepJSONAndErrorsOnSeparateStreams(t *testing.T) {
 		{[]string{"init", "--json"}, 0},
 		{[]string{"status", "--json"}, 0},
 		{[]string{"list", "--json"}, 0},
-		{[]string{"archive", "--json"}, 5},
-		{[]string{"restore", "--json"}, 5},
+		{[]string{"archive", "--json"}, 0},
+		{[]string{"restore", "--json"}, 2},
 		{[]string{"link", "--json"}, 2},
 		{[]string{"status", "--json", "--unknown"}, 2},
 	} {
