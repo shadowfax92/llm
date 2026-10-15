@@ -53,6 +53,9 @@ func (s *Store) mutate(ctx context.Context, cwd string, opts ResolveOptions, ini
 	}
 	// Resolve and validate before creating lock/store files, then repeat while
 	// locked because another writer may have established the binding meanwhile.
+	if err := checkTrackedContext(ctx, initial); err != nil {
+		return result, err
+	}
 	unlock, err := s.lock(ctx, initial.Anchor)
 	if err != nil {
 		return result, err
@@ -64,6 +67,15 @@ func (s *Store) mutate(ctx context.Context, cwd string, opts ResolveOptions, ini
 	}
 	if b.Anchor != initial.Anchor {
 		return result, conflict("context anchor changed while waiting for its lock; retry")
+	}
+	// The index may have changed while waiting. Refuse tracked context before
+	// migration/copy/publication; local ignore patterns cannot protect it. Git
+	// metadata is prepared even for idempotent calls repairing older bindings.
+	if err := checkTrackedContext(ctx, b); err != nil {
+		return result, err
+	}
+	if err := excludeGitContext(ctx, b); err != nil {
+		return result, err
 	}
 	if ensure && b.State == "managed" {
 		result.Binding = b

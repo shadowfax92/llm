@@ -20,16 +20,25 @@ You keep design docs, plans and agent context in a gitignored `.llm/` folder. De
 
 ## Install
 
-Requires Go 1.25.7 or newer.
+Requires Go 1.25.7 or newer. These build/install commands are verified on macOS;
+install also ad-hoc signs the binary with `codesign`.
 
 ```sh
 git clone https://github.com/shadowfax92/llm.git dotllm
 cd dotllm
+make build         # builds ./dotllm with the host Go defaults
 make install       # installs dotllm, plus llm as a symlink to it, into $(go env GOPATH)/bin
 make completions   # optional: fish completions for both names
 ```
 
 `make install` refuses to replace an `llm` it did not create. If you have the old `llm` binary installed, move it out of the way first, then run `make install` again. Your `~/llm` store and existing `.llm` links don't change.
+
+On macOS, archive/restore apply needs cgo and Apple's C toolchain (Xcode Command
+Line Tools) for kernel no-clobber moves via `renameatx_np(RENAME_EXCL)`. Native Go
+builds normally enable cgo; if your environment disables it, use
+`CGO_ENABLED=1 make build` or `CGO_ENABLED=1 make install`. A cgo-disabled macOS
+binary can plan, but refuses apply. Linux amd64/arm64 builds use
+`renameat2(RENAME_NOREPLACE)`; their runtime behavior has not been verified here.
 
 ## Quick start
 
@@ -52,7 +61,7 @@ code/my-project  [linked]
 $ cd "$(dotllm path)"           # the store itself
 ```
 
-Plain `dotllm` does the same as `dotllm path`. It creates the link if it is missing and prints the store path. Outside a Git repository, pass `--scope cwd` to `init` to anchor `.llm` in the current directory.
+Plain `dotllm` creates context if it is missing and shows a Linked or Already linked summary. `dotllm path` always prints only the store path. Outside a Git repository, pass `--scope cwd` to `init` to anchor `.llm` in the current directory.
 
 The *anchor* is the `.llm` entry inside a checkout. The *store* is the central directory it points to:
 
@@ -77,7 +86,14 @@ The *anchor* is the `.llm` entry inside a checkout. The *store* is the central d
 
 Every command takes `-C <dir>` (run as if in that directory), `--store <dir>`, `--json`, `--no-input` and `--color auto|always|never`. Run `dotllm <command> --help` for examples.
 
-**Not available in this build yet:** `archive` and `restore` report `unavailable` (exit 5) and move nothing until the archive slice lands.
+Creating or linking context adds local Git rules to the common `info/exclude`,
+shared by linked worktrees, for the anchor's `.llm` and stable `.dotllm.lock`.
+Existing exclusions and tracked `.gitignore` files are preserved. Read-only
+commands never update metadata. Git-tracked `.llm` content cannot be ignored:
+dotllm refuses to migrate or relink it until you deliberately preserve the data
+and remove those entries from Git's index.
+If higher-priority `.gitignore` negations prevent the exclusions, linking stops
+with guidance to inspect those rules; dotllm leaves the tracked rules intact.
 
 ## When `.llm` already exists
 
@@ -118,6 +134,7 @@ $ dotllm status --json
 ```
 
 - Success: `{"version":1,"command":…,"data":…,"warnings":[…]}` on stdout, with absolute paths.
+- Bare `dotllm --json` returns `command:"init"` with LinkData (`binding`, `changed`, `backup_path`, `added`, `conflicts`, `warnings`). Use `dotllm path --json` for the unchanged PathData (`path`, `anchor`, `changed`), or plain `dotllm path` for shell substitution.
 - Failure: stdout stays empty, and one object goes to stderr: `{"version":1,"error":{"code","message","next_action","retryable"}}`. A partial archive or restore also includes the `partial` result.
 - `binding.state` is one of `managed`, `missing`, `local` (a real directory), `dangling` (its store directory is gone), `external` (it points outside the store) or `conflict` (it is not a directory). `status`, `list` and `config` never write, and `status` exits 0 for every state: a state is data, not an error.
 - Nothing prompts. A bare `dotllm link` fails with exit 2 and a `next_action`; it never opens a picker. `link --pick` and `config edit` refuse to run without a terminal, under `--json`, or with `--no-input`.
@@ -141,11 +158,16 @@ dotllm archive code/foo --days 90                       # 1. preview; nothing mo
 dotllm archive code/foo --days 90 --plan-out plan.json  # 2. save that exact plan
 dotllm archive --apply --plan plan.json                 # 3. move only what plan.json lists
 dotllm restore --archive <plan-id>                      # preview putting it back
+dotllm restore --archive <plan-id> --plan-out restore.json  # save the exact restore plan
+dotllm restore --apply --plan restore.json              # restore only to absent origins
 ```
 
 An apply reports every entry's outcome, destination and any error. If it stops partway, that list shows exactly what moved and what stayed. `dotllm archive --list` still shows per-project counts without moving anything. Archived entries stay under the project's `archive/` directory; nothing is pruned.
 
-This flow belongs to the archive slice. Until that slice lands, `archive` and `restore` exit 5 (`unavailable`) and move nothing.
+For a partial restore, use `dotllm archive --recover <restore-operation-id>` to
+reconcile that exact operation without moving anything. The restore operation ID
+is the reported `plan_id`; `restore --archive` instead takes the original archive
+ID. Retrying an apply uses the same saved plan and never overwrites a collision.
 
 ## Configuration
 
@@ -161,7 +183,7 @@ The config file lives at `$XDG_CONFIG_HOME/dotllm/config.json`, falling back to 
 
 | `llm` | `dotllm` | What changed |
 |---|---|---|
-| `llm` (status) | `dotllm status` | Bare `dotllm` ensures context and prints the store path |
+| `llm` (status) | `dotllm status` | Bare `dotllm` ensures context and shows its linked summary |
 | `llm init` | `dotllm init` | Anchors at the repository root from any subdirectory; `--scope cwd` for a nested `.llm` |
 | `llm link` (fzf) | `dotllm link --pick` | A bare `link` explains the selectors instead of opening fzf |
 | `llm link <project>` | unchanged | Lists what was copied and where kept entries are |

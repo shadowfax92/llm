@@ -21,6 +21,7 @@ install: build
 	@echo "Installed $(BINARY) and $(COMPAT) to $(GOBIN)"
 
 completions: install
+	mkdir -p ~/.config/fish/completions
 	"$(GOBIN)/$(BINARY)" completion fish > ~/.config/fish/completions/$(BINARY).fish
 	@# Cobra embeds the root name in Fish function and command registrations.
 	"$(GOBIN)/$(BINARY)" completion fish | sed 's/dotllm/llm/g' > ~/.config/fish/completions/$(COMPAT).fish

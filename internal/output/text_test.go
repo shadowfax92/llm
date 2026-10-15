@@ -247,13 +247,11 @@ next: dotllm archive <same arguments> --plan-out <file>   # save this exact plan
 func TestRestorePlanPreview(t *testing.T) {
 	plan := archive.Plan{ID: "r1", Operation: "restore", Entries: []archive.Entry{{ProjectKey: "code/a", RelativePath: "old.md", SizeBytes: 10}}}
 	got := render(t, "restore", ArchiveData{Plan: plan}, false)
-	if !strings.HasPrefix(got, "Would restore 1 entry into code/a (nothing moved)\n") || !strings.Contains(got, "next: dotllm restore --apply --plan <file>") {
+	if !strings.HasPrefix(got, "Would restore 1 entry into code/a (nothing moved)\n") || !strings.Contains(got, "next: dotllm restore <same arguments> --plan-out <file>") || !strings.Contains(got, "dotllm restore --apply --plan <file>") {
 		t.Fatalf("restore preview:\n%s", got)
 	}
-	// restore defines no --plan-out; guidance must not send users to a flag
-	// that fails with "unknown flag".
-	if strings.Contains(got, "--plan-out") {
-		t.Fatalf("restore guidance names an undefined flag:\n%s", got)
+	if strings.Contains(got, "--archive r1") {
+		t.Fatalf("restore guidance confuses operation ID with parent archive:\n%s", got)
 	}
 }
 
