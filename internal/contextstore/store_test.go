@@ -286,10 +286,10 @@ func TestCanonicalEnsureFailsWithoutCreatingDirectories(t *testing.T) {
 	}
 	_, err := testStore(t, home).Ensure(context.Background(), cwd, ResolveOptions{})
 	if err == nil {
-		t.Fatal("canonical stub claimed success")
+		t.Fatal("automatic initialization outside Git claimed success")
 	}
 	if _, err := os.Lstat(filepath.Join(home, "llm")); !os.IsNotExist(err) {
-		t.Fatalf("stub mutated store: %v", err)
+		t.Fatalf("non-Git initialization mutated store: %v", err)
 	}
 }
 
