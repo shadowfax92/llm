@@ -66,7 +66,7 @@ llm archive
 
 `llm init` takes the current directory's path relative to `$HOME` and creates a matching directory under `~/llm/`. If a real `.llm/` folder already exists, its content is moved to the central store. A symlink replaces it.
 
-`llm link` points `.llm` at an existing project in the store — useful for multiple checkouts of the same repo, or git worktrees that should share context. `llm link --auto` uses Git's common directory for the current worktree to infer the original checkout's store, while preserving any subdirectory path inside the worktree.
+`llm link` points `.llm` at an existing project in the store — useful for multiple checkouts of the same repo, or git worktrees that should share context. If `.llm` already points at another managed store, non-conflicting files are copied into the new target before relinking. `llm link --auto` uses Git's common directory for the current worktree to infer the original checkout's store, while preserving any subdirectory path inside the worktree.
 
 A registry at `~/llm/.projects` tracks all managed projects.
 

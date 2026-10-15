@@ -1,332 +1,41 @@
 package cmd
 
 import (
-	"fmt"
-	"io"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"strings"
-
+	"dotllm/internal/contextstore"
+	"dotllm/internal/output"
 	"github.com/spf13/cobra"
 )
 
-var linkCmd = &cobra.Command{
-	Use:   "link [project]",
-	Short: "Link .llm to an existing project",
-	Long:  "Links .llm in the current directory to an existing project in ~/llm/.\nWithout arguments, shows an interactive picker.",
-	RunE:  linkRun,
-}
-
-var linkAuto bool
-
-func init() {
-	linkCmd.Flags().BoolVar(&linkAuto, "auto", false, "Link based on the canonical Git worktree path")
-	rootCmd.AddCommand(linkCmd)
-}
-
-func linkRun(cmd *cobra.Command, args []string) error {
-	var project string
-
-	if linkAuto {
-		if len(args) > 0 {
-			return fmt.Errorf("llm link --auto does not accept a project argument")
+func newLinkCommand(a *app) *cobra.Command {
+	var auto, pick bool
+	var scope string
+	cmd := &cobra.Command{Use: "link [project]", Short: "Link .llm to an existing project", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		if auto && (len(args) > 0 || pick) {
+			return &contextstore.Error{Code: "invalid_input", Message: "--auto cannot be combined with a project or --pick", NextAction: "Use dotllm link --auto or dotllm link <project>."}
 		}
-		cwd, err := os.Getwd()
-		if err != nil {
-			return err
+		if pick {
+			return &contextstore.Error{Code: "unavailable", Message: "interactive project picker is unavailable in the skeleton", NextAction: "Use dotllm list, then dotllm link <project>."}
 		}
-		project, err = resolveAutoLinkProject(cwd, homeDir)
-		if err != nil {
-			return err
-		}
-	} else if len(args) > 0 {
-		project = args[0]
-	} else {
-		projects, err := loadRegistry()
-		if err != nil {
-			return fmt.Errorf("load registry: %w", err)
-		}
-		if len(projects) == 0 {
-			return fmt.Errorf("no projects registered; run 'llm init' in a project first")
-		}
-
-		if _, err := exec.LookPath("fzf"); err != nil {
-			return fmt.Errorf("fzf not found; install it or pass project as argument")
-		}
-
-		selected, err := fzfPick(projects, "Project> ")
-		if err != nil {
-			return err
-		}
-		project = selected
-	}
-
-	centralPath := filepath.Join(llmRoot, project)
-	if _, err := os.Stat(centralPath); err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("project %q not found at %s", project, tildefy(centralPath))
-		}
-		return err
-	}
-
-	cwd, err := os.Getwd()
-	if err != nil {
-		return err
-	}
-
-	llmPath := filepath.Join(cwd, ".llm")
-
-	if info, err := os.Lstat(llmPath); err == nil {
-		if info.Mode()&os.ModeSymlink != 0 {
-			existing, _ := os.Readlink(llmPath)
-			if existing == centralPath {
-				fmt.Println("Already linked.")
-				return nil
-			}
-			os.Remove(llmPath)
-		} else if info.IsDir() {
-			backupPath := llmPath + ".bak"
-			if _, err := os.Stat(backupPath); err == nil {
-				return fmt.Errorf(".llm and .llm.bak both exist; resolve manually")
-			}
-			if err := os.Rename(llmPath, backupPath); err != nil {
-				return fmt.Errorf("backup .llm: %w", err)
-			}
-			fmt.Printf("Backed up .llm → .llm.bak (safety copy)\n")
-
-			added, skipped, err := mergeDir(backupPath, centralPath)
+		var key string
+		if auto {
+			binding, err := a.store.Resolve(cmd.Context(), a.cwd, contextstore.ResolveOptions{Scope: contextstore.ScopeRepo})
 			if err != nil {
-				return fmt.Errorf("merge .llm.bak → %s: %w", tildefy(centralPath), err)
+				return operationError{err}
 			}
-			reportMerge(centralPath, added, skipped)
+			key = binding.Project.Key
+		} else if len(args) > 0 {
+			key = args[0]
+		} else {
+			return &contextstore.Error{Code: "selector_required", Message: "an explicit project or --auto is required", NextAction: "Run dotllm list, then dotllm link <project>."}
 		}
-	}
-
-	if err := os.Symlink(centralPath, llmPath); err != nil {
-		return fmt.Errorf("create symlink: %w", err)
-	}
-
-	fmt.Printf("Linked: .llm → %s\n", tildefy(centralPath))
-	return nil
-}
-
-// resolveAutoLinkProject maps a Git worktree path to the existing or inferred project key in ~/llm.
-func resolveAutoLinkProject(startDir, home string) (string, error) {
-	startDir, err := realPath(startDir)
-	if err != nil {
-		return "", err
-	}
-	home, err = realPath(home)
-	if err != nil {
-		return "", err
-	}
-
-	worktreeRoot, err := gitOutput(startDir, "rev-parse", "--path-format=absolute", "--show-toplevel")
-	if err != nil {
-		return "", fmt.Errorf("resolve git worktree root: %w", err)
-	}
-	worktreeRoot, err = realPath(worktreeRoot)
-	if err != nil {
-		return "", err
-	}
-	commonGitDir, err := gitOutput(startDir, "rev-parse", "--path-format=absolute", "--git-common-dir")
-	if err != nil {
-		return "", fmt.Errorf("resolve git common dir: %w", err)
-	}
-	commonGitDir, err = realPath(commonGitDir)
-	if err != nil {
-		return "", err
-	}
-
-	canonicalRoot := canonicalProjectRoot(worktreeRoot, commonGitDir)
-	insideWorktree, err := filepath.Rel(worktreeRoot, startDir)
-	if err != nil {
-		return "", err
-	}
-	if insideWorktree == ".." || strings.HasPrefix(insideWorktree, ".."+string(os.PathSeparator)) {
-		return "", fmt.Errorf("%s is outside git worktree root %s", startDir, worktreeRoot)
-	}
-
-	projectPath := canonicalRoot
-	if insideWorktree != "." {
-		projectPath = filepath.Join(projectPath, insideWorktree)
-	}
-	if project, ok, err := linkedProject(projectPath, home); err != nil {
-		return "", err
-	} else if ok {
-		return project, nil
-	}
-
-	project, err := filepath.Rel(home, projectPath)
-	if err != nil {
-		return "", err
-	}
-	if project == ".." || strings.HasPrefix(project, ".."+string(os.PathSeparator)) {
-		return "", fmt.Errorf("project must be under home directory (%s)", home)
-	}
-	return project, nil
-}
-
-// linkedProject returns the registry key from an existing .llm symlink.
-func linkedProject(projectPath, home string) (string, bool, error) {
-	llmPath := filepath.Join(projectPath, ".llm")
-	info, err := os.Lstat(llmPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", false, nil
-		}
-		return "", false, err
-	}
-	if info.Mode()&os.ModeSymlink == 0 {
-		return "", false, nil
-	}
-
-	target, err := os.Readlink(llmPath)
-	if err != nil {
-		return "", false, err
-	}
-	if !filepath.IsAbs(target) {
-		target = filepath.Join(projectPath, target)
-	}
-	target, err = realPath(target)
-	if err != nil {
-		return "", false, fmt.Errorf("resolve %s: %w", llmPath, err)
-	}
-	root, err := realPath(filepath.Join(home, "llm"))
-	if err != nil {
-		return "", false, fmt.Errorf("resolve llm root: %w", err)
-	}
-	project, err := filepath.Rel(root, target)
-	if err != nil {
-		return "", false, err
-	}
-	if project == ".." || strings.HasPrefix(project, ".."+string(os.PathSeparator)) {
-		return "", false, fmt.Errorf("%s points outside llm root (%s)", llmPath, root)
-	}
-	return project, true, nil
-}
-
-func realPath(path string) (string, error) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return "", err
-	}
-	return filepath.EvalSymlinks(abs)
-}
-
-func canonicalProjectRoot(worktreeRoot, commonGitDir string) string {
-	commonGitDir = filepath.Clean(commonGitDir)
-	if filepath.Base(commonGitDir) == ".git" {
-		return filepath.Dir(commonGitDir)
-	}
-	return filepath.Clean(worktreeRoot)
-}
-
-func gitOutput(dir string, args ...string) (string, error) {
-	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("%s (%w)", strings.TrimSpace(string(out)), err)
-	}
-	result := strings.TrimSpace(string(out))
-	if result == "" {
-		return "", fmt.Errorf("empty git output")
-	}
-	return filepath.Clean(result), nil
-}
-
-// mergeDir copies regular files from src into dst. Files that already exist
-// in dst are left untouched and returned in `skipped` so the caller can
-// surface them. Directories and intermediate paths are created as needed.
-// Non-regular, non-directory entries (symlinks, sockets, etc.) are skipped.
-func mergeDir(src, dst string) (added, skipped []string, err error) {
-	err = filepath.Walk(src, func(path string, info os.FileInfo, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		rel, err := filepath.Rel(src, path)
+		result, err := a.store.Link(cmd.Context(), a.cwd, key, contextstore.Scope(scope))
 		if err != nil {
-			return err
+			return operationError{err}
 		}
-		if rel == "." {
-			return nil
-		}
-		destPath := filepath.Join(dst, rel)
-
-		if info.IsDir() {
-			return os.MkdirAll(destPath, info.Mode())
-		}
-		if !info.Mode().IsRegular() {
-			return nil
-		}
-		if _, statErr := os.Stat(destPath); statErr == nil {
-			skipped = append(skipped, rel)
-			return nil
-		}
-		if err := copyFileMode(path, destPath, info.Mode()); err != nil {
-			return err
-		}
-		added = append(added, rel)
-		return nil
-	})
-	return
-}
-
-func copyFileMode(src, dst string, mode os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
-		return err
-	}
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode.Perm())
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-	if _, err := io.Copy(out, in); err != nil {
-		return err
-	}
-	return nil
-}
-
-func reportMerge(centralPath string, added, skipped []string) {
-	central := tildefy(centralPath)
-	if len(added) == 0 && len(skipped) == 0 {
-		fmt.Printf("(.llm was empty; nothing to move)\n")
-		return
-	}
-	if len(added) > 0 {
-		fmt.Printf("Moved %d file(s) into %s:\n", len(added), central)
-		for _, f := range added {
-			fmt.Printf("  + %s\n", f)
-		}
-	}
-	if len(skipped) > 0 {
-		fmt.Printf("Skipped %d file(s) (already exist in %s — resolve from .llm.bak if needed):\n", len(skipped), central)
-		for _, f := range skipped {
-			fmt.Printf("  ~ %s\n", f)
-		}
-	}
-}
-
-func fzfPick(items []string, prompt string) (string, error) {
-	fzf := exec.Command("fzf", "--prompt", prompt)
-	fzf.Stdin = strings.NewReader(strings.Join(items, "\n"))
-	fzf.Stderr = os.Stderr
-	out, err := fzf.Output()
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 130 {
-			return "", fmt.Errorf("cancelled")
-		}
-		return "", fmt.Errorf("fzf: %w", err)
-	}
-	result := strings.TrimSpace(string(out))
-	if result == "" {
-		return "", fmt.Errorf("no selection")
-	}
-	return result, nil
+		return a.write(cmd, "link", output.LinkData(result), result.Warnings)
+	}}
+	cmd.Flags().BoolVar(&auto, "auto", false, "Use legacy Git worktree-relative project lookup")
+	cmd.Flags().BoolVar(&pick, "pick", false, "Explicitly request a project picker (unavailable in skeleton)")
+	cmd.Flags().StringVar(&scope, "scope", "cwd", "Link scope")
+	return cmd
 }

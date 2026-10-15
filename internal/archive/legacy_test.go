@@ -1,6 +1,7 @@
-package cmd
+package archive
 
 import (
+	"dotllm/internal/contextstore"
 	"os"
 	"path/filepath"
 	"slices"
@@ -63,7 +64,8 @@ func TestArchiveCandidatesIncludesStaleArchiveFile(t *testing.T) {
 }
 
 func TestArchiveProjectMovesStaleEntriesAndKeepsFreshEntries(t *testing.T) {
-	root := setTestLLMRoot(t)
+	a := testLegacyArchive(t)
+	root := a.root
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	cutoff := now.AddDate(0, 0, -30)
 	old := now.AddDate(0, 0, -31)
@@ -77,7 +79,7 @@ func TestArchiveProjectMovesStaleEntriesAndKeepsFreshEntries(t *testing.T) {
 	writeFileAt(t, filepath.Join(oldDir, "notes.md"), old)
 	chtimes(t, oldDir, fresh)
 
-	result, err := archiveProject(project, cutoff, now)
+	result, err := a.archiveProject(project, cutoff, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +95,8 @@ func TestArchiveProjectMovesStaleEntriesAndKeepsFreshEntries(t *testing.T) {
 }
 
 func TestArchiveProjectArchivesStaleArchiveFile(t *testing.T) {
-	root := setTestLLMRoot(t)
+	a := testLegacyArchive(t)
+	root := a.root
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	cutoff := now.AddDate(0, 0, -30)
 	old := now.AddDate(0, 0, -31)
@@ -102,7 +105,7 @@ func TestArchiveProjectArchivesStaleArchiveFile(t *testing.T) {
 
 	writeFileAt(t, filepath.Join(projectDir, "archive"), old)
 
-	result, err := archiveProject(project, cutoff, now)
+	result, err := a.archiveProject(project, cutoff, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +117,8 @@ func TestArchiveProjectArchivesStaleArchiveFile(t *testing.T) {
 }
 
 func TestArchiveProjectUsesUniqueDestinationForCollisions(t *testing.T) {
-	root := setTestLLMRoot(t)
+	a := testLegacyArchive(t)
+	root := a.root
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	cutoff := now.AddDate(0, 0, -30)
 	old := now.AddDate(0, 0, -31)
@@ -124,7 +128,7 @@ func TestArchiveProjectUsesUniqueDestinationForCollisions(t *testing.T) {
 	writeFileAt(t, filepath.Join(projectDir, "notes.md"), old)
 	writeFileAt(t, filepath.Join(projectDir, "archive", "notes.md"), old)
 
-	result, err := archiveProject(project, cutoff, now)
+	result, err := a.archiveProject(project, cutoff, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +146,8 @@ func TestArchiveProjectUsesUniqueDestinationForCollisions(t *testing.T) {
 }
 
 func TestArchiveProjectSummariesUseRegistryCounts(t *testing.T) {
-	root := setTestLLMRoot(t)
+	a := testLegacyArchive(t)
+	root := a.root
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	cutoff := now.AddDate(0, 0, -30)
 	old := now.AddDate(0, 0, -31)
@@ -154,11 +159,11 @@ func TestArchiveProjectSummariesUseRegistryCounts(t *testing.T) {
 	writeFileAt(t, filepath.Join(root, projectOne, "fresh.md"), fresh)
 	writeFileAt(t, filepath.Join(root, projectTwo, "fresh.md"), fresh)
 
-	if err := saveRegistry([]string{projectOne, projectTwo, filepath.Join("code", "missing")}); err != nil {
+	if err := os.WriteFile(filepath.Join(root, ".projects"), []byte(strings.Join([]string{projectOne, projectTwo, filepath.Join("code", "missing")}, "\n")+"\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	summaries, err := archiveProjectSummaries(cutoff)
+	summaries, err := a.archiveProjectSummaries(cutoff)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,14 +178,15 @@ func TestArchiveProjectSummariesUseRegistryCounts(t *testing.T) {
 }
 
 func TestArchiveProjectRejectsPathsOutsideLLMRoot(t *testing.T) {
-	root := setTestLLMRoot(t)
+	a := testLegacyArchive(t)
+	root := a.root
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	cutoff := now.AddDate(0, 0, -30)
 	old := now.AddDate(0, 0, -31)
 	outsideDir := filepath.Join(filepath.Dir(root), "outside")
 	writeFileAt(t, filepath.Join(outsideDir, "old.md"), old)
 
-	_, err := archiveProject(filepath.Join("..", "outside"), cutoff, now)
+	_, err := a.archiveProject(filepath.Join("..", "outside"), cutoff, now)
 	if err == nil {
 		t.Fatal("expected archiveProject to reject project outside llm root")
 	}
@@ -189,7 +195,8 @@ func TestArchiveProjectRejectsPathsOutsideLLMRoot(t *testing.T) {
 }
 
 func TestArchiveProjectRejectsSymlinkedProjectOutsideLLMRoot(t *testing.T) {
-	root := setTestLLMRoot(t)
+	a := testLegacyArchive(t)
+	root := a.root
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	cutoff := now.AddDate(0, 0, -30)
 	old := now.AddDate(0, 0, -31)
@@ -199,7 +206,7 @@ func TestArchiveProjectRejectsSymlinkedProjectOutsideLLMRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := archiveProject("evil", cutoff, now)
+	_, err := a.archiveProject("evil", cutoff, now)
 	if err == nil {
 		t.Fatal("expected archiveProject to reject symlinked project outside llm root")
 	}
@@ -216,18 +223,14 @@ func archiveCandidateNames(candidates []archiveCandidate) []string {
 	return names
 }
 
-func setTestLLMRoot(t *testing.T) string {
+func testLegacyArchive(t *testing.T) *legacyArchive {
 	t.Helper()
-	oldRoot := llmRoot
-	oldHome := homeDir
 	root := t.TempDir()
-	llmRoot = root
-	homeDir = filepath.Dir(root)
-	t.Cleanup(func() {
-		llmRoot = oldRoot
-		homeDir = oldHome
-	})
-	return root
+	store, err := contextstore.Open(contextstore.Config{Root: root, Home: filepath.Dir(root)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &legacyArchive{root: root, store: store}
 }
 
 func assertExists(t *testing.T, path string) {
