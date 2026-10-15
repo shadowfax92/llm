@@ -14,7 +14,7 @@ import (
 var linkCmd = &cobra.Command{
 	Use:   "link [project]",
 	Short: "Link .llm to an existing project",
-	Long:  "Links .llm in the current directory to an existing project in ~/llm/.\nWithout arguments, shows an interactive picker.",
+	Long:  "Links .llm in the current directory to an existing project in ~/llm/.\nIf .llm already points at another managed store, non-conflicting files are copied into the new target first.\nWithout arguments, shows an interactive picker.",
 	RunE:  linkRun,
 }
 
@@ -79,12 +79,14 @@ func linkRun(cmd *cobra.Command, args []string) error {
 
 	if info, err := os.Lstat(llmPath); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 {
-			existing, _ := os.Readlink(llmPath)
-			if existing == centralPath {
+			alreadyLinked, err := prepareExistingLink(cwd, llmPath, centralPath)
+			if err != nil {
+				return err
+			}
+			if alreadyLinked {
 				fmt.Println("Already linked.")
 				return nil
 			}
-			os.Remove(llmPath)
 		} else if info.IsDir() {
 			backupPath := llmPath + ".bak"
 			if _, err := os.Stat(backupPath); err == nil {
@@ -108,6 +110,70 @@ func linkRun(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("Linked: .llm → %s\n", tildefy(centralPath))
+	return nil
+}
+
+// prepareExistingLink preserves managed context before changing a .llm symlink.
+func prepareExistingLink(cwd, llmPath, centralPath string) (bool, error) {
+	existing, err := os.Readlink(llmPath)
+	if err != nil {
+		return false, err
+	}
+	existingPath := existing
+	if !filepath.IsAbs(existingPath) {
+		existingPath = filepath.Join(cwd, existingPath)
+	}
+	if sameResolvedPath(existingPath, centralPath) {
+		return true, nil
+	}
+	if err := mergeManagedLinkTarget(existingPath, centralPath); err != nil {
+		return false, err
+	}
+	if err := os.Remove(llmPath); err != nil {
+		return false, fmt.Errorf("remove existing .llm symlink: %w", err)
+	}
+	return false, nil
+}
+
+// mergeManagedLinkTarget carries old symlink target content into the new store.
+func mergeManagedLinkTarget(src, dst string) error {
+	info, err := os.Stat(src)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("inspect existing .llm target %s: %w", tildefy(src), err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("existing .llm target %s is not a directory", tildefy(src))
+	}
+
+	srcReal, err := realPath(src)
+	if err != nil {
+		return fmt.Errorf("resolve existing .llm target %s: %w", tildefy(src), err)
+	}
+	dstReal, err := realPath(dst)
+	if err != nil {
+		return fmt.Errorf("resolve target %s: %w", tildefy(dst), err)
+	}
+	rootReal, err := realPath(llmRoot)
+	if err != nil {
+		return fmt.Errorf("resolve llm root: %w", err)
+	}
+	if !pathWithinOrEqual(srcReal, rootReal) {
+		return fmt.Errorf("existing .llm target %s is outside %s; move it manually before relinking", tildefy(srcReal), tildefy(rootReal))
+	}
+	if pathWithin(dstReal, srcReal) {
+		return fmt.Errorf("cannot merge %s into descendant %s", tildefy(srcReal), tildefy(dstReal))
+	}
+
+	added, skipped, err := mergeDir(srcReal, dstReal)
+	if err != nil {
+		return fmt.Errorf("merge existing .llm target %s → %s: %w", tildefy(srcReal), tildefy(dstReal), err)
+	}
+	if len(added) > 0 || len(skipped) > 0 {
+		reportLinkedTargetMerge(dstReal, srcReal, added, skipped)
+	}
 	return nil
 }
 
@@ -215,6 +281,26 @@ func realPath(path string) (string, error) {
 	return filepath.EvalSymlinks(abs)
 }
 
+func sameResolvedPath(a, b string) bool {
+	aReal, aErr := realPath(a)
+	bReal, bErr := realPath(b)
+	if aErr == nil && bErr == nil {
+		return aReal == bReal
+	}
+	aAbs, aErr := filepath.Abs(a)
+	bAbs, bErr := filepath.Abs(b)
+	return aErr == nil && bErr == nil && filepath.Clean(aAbs) == filepath.Clean(bAbs)
+}
+
+func pathWithin(path, root string) bool {
+	rel, err := filepath.Rel(root, path)
+	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
+}
+
+func pathWithinOrEqual(path, root string) bool {
+	return path == root || pathWithin(path, root)
+}
+
 func canonicalProjectRoot(worktreeRoot, commonGitDir string) string {
 	commonGitDir = filepath.Clean(commonGitDir)
 	if filepath.Base(commonGitDir) == ".git" {
@@ -307,6 +393,24 @@ func reportMerge(centralPath string, added, skipped []string) {
 	}
 	if len(skipped) > 0 {
 		fmt.Printf("Skipped %d file(s) (already exist in %s — resolve from .llm.bak if needed):\n", len(skipped), central)
+		for _, f := range skipped {
+			fmt.Printf("  ~ %s\n", f)
+		}
+	}
+}
+
+func reportLinkedTargetMerge(centralPath, previousTarget string, added, skipped []string) {
+	central := tildefy(centralPath)
+	previous := tildefy(previousTarget)
+	fmt.Printf("Merged previous .llm target %s\n", previous)
+	if len(added) > 0 {
+		fmt.Printf("Copied %d file(s) into %s:\n", len(added), central)
+		for _, f := range added {
+			fmt.Printf("  + %s\n", f)
+		}
+	}
+	if len(skipped) > 0 {
+		fmt.Printf("Skipped %d file(s) (already exist in %s; originals remain in %s):\n", len(skipped), central, previous)
 		for _, f := range skipped {
 			fmt.Printf("  ~ %s\n", f)
 		}

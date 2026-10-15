@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -90,6 +91,81 @@ func TestResolveAutoLinkProjectRequiresGitRepo(t *testing.T) {
 	}
 }
 
+func TestLinkRunMergesExistingSymlinkTargetBeforeRelinking(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "code", "checkout")
+	oldProject := filepath.Join("code", "old")
+	newProject := filepath.Join("code", "new")
+	oldTarget := filepath.Join(home, "llm", oldProject)
+	newTarget := filepath.Join(home, "llm", newProject)
+
+	for _, dir := range []string{cwd, oldTarget, newTarget} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeTestFile(t, filepath.Join(oldTarget, "old-only.md"), "old\n")
+	writeTestFile(t, filepath.Join(oldTarget, "same.md"), "old same\n")
+	writeTestFile(t, filepath.Join(newTarget, "same.md"), "new same\n")
+	if err := os.Symlink(oldTarget, filepath.Join(cwd, ".llm")); err != nil {
+		t.Fatal(err)
+	}
+
+	restore := useTestHome(t, home, cwd)
+	defer restore()
+
+	if err := linkRun(linkCmd, []string{newProject}); err != nil {
+		t.Fatal(err)
+	}
+
+	target, err := os.Readlink(filepath.Join(cwd, ".llm"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target != newTarget {
+		t.Fatalf(".llm target = %q, want %q", target, newTarget)
+	}
+	assertFileContent(t, filepath.Join(newTarget, "old-only.md"), "old\n")
+	assertFileContent(t, filepath.Join(newTarget, "same.md"), "new same\n")
+	assertFileContent(t, filepath.Join(oldTarget, "old-only.md"), "old\n")
+}
+
+func TestLinkRunRejectsMergeIntoDescendantTarget(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "code", "checkout")
+	oldProject := filepath.Join("code", "project")
+	newProject := filepath.Join("code", "project", "packages", "cli")
+	oldTarget := filepath.Join(home, "llm", oldProject)
+	newTarget := filepath.Join(home, "llm", newProject)
+
+	for _, dir := range []string{cwd, oldTarget, newTarget} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(oldTarget, filepath.Join(cwd, ".llm")); err != nil {
+		t.Fatal(err)
+	}
+
+	restore := useTestHome(t, home, cwd)
+	defer restore()
+
+	err := linkRun(linkCmd, []string{newProject})
+	if err == nil {
+		t.Fatal("expected descendant merge to fail")
+	}
+	if !strings.Contains(err.Error(), "cannot merge") {
+		t.Fatalf("error = %q, want cannot merge", err)
+	}
+	target, err := os.Readlink(filepath.Join(cwd, ".llm"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target != oldTarget {
+		t.Fatalf(".llm target = %q, want %q", target, oldTarget)
+	}
+}
+
 func initGitRepo(t *testing.T, path string) {
 	t.Helper()
 	if err := os.MkdirAll(path, 0755); err != nil {
@@ -115,5 +191,48 @@ func runGit(t *testing.T, dir string, args ...string) {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+func useTestHome(t *testing.T, home, cwd string) func() {
+	t.Helper()
+	oldHome := homeDir
+	oldRoot := llmRoot
+	oldLinkAuto := linkAuto
+	oldCwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	homeDir = home
+	llmRoot = filepath.Join(home, "llm")
+	linkAuto = false
+	if err := os.Chdir(cwd); err != nil {
+		t.Fatal(err)
+	}
+	return func() {
+		homeDir = oldHome
+		llmRoot = oldRoot
+		linkAuto = oldLinkAuto
+		if err := os.Chdir(oldCwd); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func writeTestFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertFileContent(t *testing.T, path, want string) {
+	t.Helper()
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != want {
+		t.Fatalf("%s = %q, want %q", path, content, want)
 	}
 }
