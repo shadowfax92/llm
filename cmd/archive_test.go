@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -170,5 +171,144 @@ func TestArchiveCLIPartialErrorsUseStderrAndRetainPaths(t *testing.T) {
 	}
 	if data, err := os.ReadFile(archived); err != nil || string(data) != "edited archive" {
 		t.Fatalf("retained bytes=%q %v", data, err)
+	}
+}
+
+// Archive uses contextstore's read-only identity resolution from both a nested
+// main checkout and a linked worktree. A dry plan must reuse canonical context
+// without publishing another .llm or registering a worktree-specific project.
+func TestArchiveCLICanonicalNestedCurrentSelection(t *testing.T) {
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	t.Setenv("DOTLLM_ROOT", "")
+	repo := filepath.Join(home, "code", "repo")
+	nested := filepath.Join(repo, "src", "deep")
+	if err := os.MkdirAll(nested, 0700); err != nil {
+		t.Fatal(err)
+	}
+	git := func(args ...string) {
+		t.Helper()
+		command := exec.Command("git", append([]string{"-C", repo}, args...)...)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v %s", args, err, output)
+		}
+	}
+	git("init", "-q")
+	git("-c", "user.name=Archive Fixture", "-c", "user.email=archive-fixture@example.test", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "fixture")
+	deps := Dependencies{Home: home, Cwd: nested}
+	code, out, diagnostics := runArchiveCLI(t, deps, "init", "--json")
+	if code != 0 || diagnostics != "" {
+		t.Fatalf("canonical init: %d %s %s", code, out, diagnostics)
+	}
+	var initialized struct {
+		Data output.LinkData `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &initialized); err != nil {
+		t.Fatal(err)
+	}
+	project := initialized.Data.Binding.Project
+	if project.Key != "code/repo" {
+		t.Fatalf("canonical project=%+v", project)
+	}
+	note := filepath.Join(project.Root, "old-note")
+	if err := os.WriteFile(note, []byte("canonical archived bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-90 * 24 * time.Hour)
+	if err := os.Chtimes(note, old, old); err != nil {
+		t.Fatal(err)
+	}
+	worktree := filepath.Join(home, "worktrees", "review")
+	git("worktree", "add", "-q", "-b", "archive-fixture", worktree)
+	worktreeNested := filepath.Join(worktree, "src", "deep")
+	if err := os.MkdirAll(worktreeNested, 0700); err != nil {
+		t.Fatal(err)
+	}
+	registry := filepath.Join(home, "llm", ".projects")
+	before, err := os.ReadFile(registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fingerprint string
+	for _, cwd := range []string{nested, worktreeNested} {
+		current := deps
+		current.Cwd = cwd
+		code, out, diagnostics := runArchiveCLI(t, current, "archive", "--json", "--plan-out", "review.json")
+		if code != 0 || diagnostics != "" {
+			t.Fatalf("archive cwd=%s: %d %s %s", cwd, code, out, diagnostics)
+		}
+		var planned struct {
+			Data output.ArchiveData `json:"data"`
+		}
+		if err := json.Unmarshal([]byte(out), &planned); err != nil {
+			t.Fatal(err)
+		}
+		entries := planned.Data.Plan.Entries
+		if len(entries) != 1 || entries[0].ProjectKey != "code/repo" || entries[0].RelativePath != "old-note" {
+			t.Fatalf("cwd=%s plan=%+v", cwd, planned.Data.Plan)
+		}
+		if fingerprint != "" && entries[0].Fingerprint != fingerprint {
+			t.Fatal("same canonical file acquired a different identity from linked worktree")
+		}
+		fingerprint = entries[0].Fingerprint
+		if _, err := os.Stat(filepath.Join(cwd, "review.json")); err != nil {
+			t.Fatalf("plan-out ignored selected cwd: %v", err)
+		}
+		if _, err := os.Lstat(filepath.Join(cwd, ".llm")); !os.IsNotExist(err) {
+			t.Fatalf("archive published nested binding: %v", err)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(worktree, ".llm")); !os.IsNotExist(err) {
+		t.Fatalf("archive published worktree root binding: %v", err)
+	}
+	after, err := os.ReadFile(registry)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("dry plan changed registry: %q %v", after, err)
+	}
+	if data, err := os.ReadFile(note); err != nil || string(data) != "canonical archived bytes" {
+		t.Fatalf("dry plan moved bytes: %q %v", data, err)
+	}
+	// Explicit legacy nested context wins over the repo-wide canonical binding,
+	// including from the corresponding path in a linked worktree.
+	code, out, diagnostics = runArchiveCLI(t, deps, "init", "--scope", "cwd", "--project", "legacy/nested", "--json")
+	if code != 0 || diagnostics != "" {
+		t.Fatalf("nested init: %d %s %s", code, out, diagnostics)
+	}
+	if err := json.Unmarshal([]byte(out), &initialized); err != nil {
+		t.Fatal(err)
+	}
+	nestedNote := filepath.Join(initialized.Data.Binding.Project.Root, "nested-note")
+	if err := os.WriteFile(nestedNote, []byte("nested context bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(nestedNote, old, old); err != nil {
+		t.Fatal(err)
+	}
+	for _, cwd := range []string{filepath.Join(nested, "inside"), filepath.Join(worktreeNested, "inside")} {
+		if err := os.MkdirAll(cwd, 0700); err != nil {
+			t.Fatal(err)
+		}
+		current := deps
+		current.Cwd = cwd
+		code, out, diagnostics := runArchiveCLI(t, current, "archive", "--json")
+		if code != 0 || diagnostics != "" {
+			t.Fatalf("nested archive cwd=%s: %d %s %s", cwd, code, out, diagnostics)
+		}
+		var planned struct {
+			Data output.ArchiveData `json:"data"`
+		}
+		if err := json.Unmarshal([]byte(out), &planned); err != nil {
+			t.Fatal(err)
+		}
+		entries := planned.Data.Plan.Entries
+		if len(entries) != 1 || entries[0].ProjectKey != "legacy/nested" || entries[0].RelativePath != "nested-note" {
+			t.Fatalf("nearest nested selection cwd=%s: %+v", cwd, planned.Data.Plan)
+		}
+		if _, err := os.Lstat(filepath.Join(cwd, ".llm")); !os.IsNotExist(err) {
+			t.Fatalf("archive published deeper binding: %v", err)
+		}
 	}
 }
