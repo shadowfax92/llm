@@ -526,3 +526,46 @@ func TestPartialRestoreKeepsMonotonicMoveHistory(t *testing.T) {
 		t.Fatalf("restored data lost from origin: %q %v", data, err)
 	}
 }
+func TestMultiProjectRestoreRequiresUnambiguousSelection(t *testing.T) {
+	f := setup(t)
+	other := filepath.Join(f.root, "other")
+	if err := os.Mkdir(other, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.root, ".projects"), []byte("repo\nother\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-90 * 24 * time.Hour)
+	put(t, filepath.Join(f.project.Root, "note"), []byte("repo bytes"), old)
+	put(t, filepath.Join(other, "note"), []byte("other bytes"), old)
+	ctx := context.Background()
+	projects, err := f.store.Projects(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := f.manager.Plan(ctx, archive.Selection{Projects: projects, OlderThan: time.Now().Add(-30 * 24 * time.Hour)})
+	if err != nil || len(plan.Entries) != 2 {
+		t.Fatalf("plan=%+v %v", plan, err)
+	}
+	if _, err := f.manager.Apply(ctx, plan); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.manager.PlanRestore(ctx, plan.ID, []string{"note"}); err == nil {
+		t.Fatal("ambiguous multi-project restore accepted")
+	}
+	for _, key := range []string{"repo", "other"} {
+		restore, err := f.manager.PlanRestore(ctx, plan.ID, []string{key + "/note"})
+		if err != nil || len(restore.Entries) != 1 {
+			t.Fatalf("restore=%+v %v", restore, err)
+		}
+		if _, err := f.manager.Apply(ctx, restore); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, key := range []string{"repo", "other"} {
+		data, err := os.ReadFile(filepath.Join(f.root, key, "note"))
+		if err != nil || string(data) != key+" bytes" {
+			t.Fatalf("%s roundtrip=%q %v", key, data, err)
+		}
+	}
+}
