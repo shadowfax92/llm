@@ -12,10 +12,14 @@ func newListCommand(a *app) *cobra.Command {
 		if err != nil {
 			return operationError{err}
 		}
-		binding, err := a.store.Resolve(cmd.Context(), a.cwd, contextstore.ResolveOptions{Scope: contextstore.ScopeCwd})
+		binding, err := a.store.Resolve(cmd.Context(), a.cwd, contextstore.ResolveOptions{Scope: contextstore.ScopeRepo})
 		if err != nil {
 			return operationError{err}
 		}
-		return a.write(cmd, "list", output.ListData{Projects: projects, Current: binding.Project.Key}, nil)
+		current := ""
+		if binding.State == "managed" {
+			current = binding.Project.Key
+		}
+		return a.write(cmd, "list", output.ListData{Projects: projects, Current: current}, nil)
 	}}
 }
