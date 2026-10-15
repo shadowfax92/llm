@@ -721,7 +721,7 @@ func (r *renderer) applied(command string, result archive.Result) {
 		}
 		r.next("next", items)
 	case !result.Complete:
-		r.next("next", []next{{"dotllm restore --archive " + id, "preview what is still archived"}})
+		r.next("next", []next{{"dotllm archive --recover " + id, "reconcile this exact restore; nothing moves"}})
 	}
 }
 

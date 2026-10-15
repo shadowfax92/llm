@@ -312,3 +312,51 @@ func TestArchiveCLICanonicalNestedCurrentSelection(t *testing.T) {
 		}
 	}
 }
+
+func TestRestoreCLIPartialHumanOutputNamesRestoreAndRetainedArchive(t *testing.T) {
+	deps, root, project := archiveCLI(t)
+	store, err := contextstore.Open(contextstore.Config{Home: deps.Home, Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := archive.New(store)
+	ctx := context.Background()
+	plan, err := manager.Plan(ctx, archive.Selection{Projects: []contextstore.Project{{Key: "repo", Root: project}}, OlderThan: time.Now().Add(-30 * 24 * time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	moved, err := manager.Apply(ctx, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restore, err := manager.PlanRestore(ctx, plan.ID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planPath := filepath.Join(deps.Home, "restore.json")
+	if err := writeArchivePlan(planPath, restore); err != nil {
+		t.Fatal(err)
+	}
+	j := map[string]any{"version": 1, "plan": restore, "origins": map[string]string{"repo": project}, "intents": []bool{false}, "result": archive.Result{PlanID: restore.ID}}
+	data, err := json.Marshal(j)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".dotllm", "archive", restore.ID+".json"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	retained := moved.Outcomes[0].Destination
+	if err := os.WriteFile(retained, []byte("changed archived bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	code, out, diagnostics := runArchiveCLI(t, deps, "restore", "--apply", "--plan", planPath)
+	if code != 4 || out != "" || !strings.Contains(diagnostics, "Restore incomplete") || !strings.Contains(diagnostics, retained) || !strings.Contains(diagnostics, "source fingerprint changed") {
+		t.Fatalf("restore partial: %d stdout=%s stderr=%s", code, out, diagnostics)
+	}
+	if _, err := os.Lstat(filepath.Join(project, "note")); !os.IsNotExist(err) {
+		t.Fatalf("failed partial restore wrote origin: %v", err)
+	}
+	if data, err := os.ReadFile(retained); err != nil || string(data) != "changed archived bytes" {
+		t.Fatalf("retained data=%q %v", data, err)
+	}
+}

@@ -143,7 +143,7 @@ func operationResult(err error) error {
 func Execute(args []string, deps Dependencies) int {
 	root := NewRoot(deps)
 	root.SetArgs(args)
-	err := root.Execute()
+	executed, err := root.ExecuteC()
 	if err == nil {
 		return 0
 	}
@@ -176,6 +176,7 @@ func Execute(args []string, deps Dependencies) int {
 	}
 	// Preserve the archive module's actual progress after error classification.
 	// Rendering remains owned by output, including retained destination paths.
+	// Keep the executed command so restore failures retain their own action name.
 	var partial interface{ PartialResult() *archive.Result }
 	if errors.As(err, &partial) {
 		detail.Partial = partial.PartialResult()
@@ -200,7 +201,7 @@ func Execute(args []string, deps Dependencies) int {
 		fmt.Fprintln(root.ErrOrStderr(), strings.TrimSpace(detail.Message))
 		fmt.Fprintln(root.ErrOrStderr(), detail.NextAction)
 		if detail.Partial != nil {
-			_ = output.WriteText(root.ErrOrStderr(), output.Envelope{Version: 1, Command: "archive", Data: output.ApplyData{Result: *detail.Partial}}, output.Options{})
+			_ = output.WriteText(root.ErrOrStderr(), output.Envelope{Version: 1, Command: executed.Name(), Data: output.ApplyData{Result: *detail.Partial}}, output.Options{})
 		}
 	}
 	return code
