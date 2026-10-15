@@ -290,7 +290,7 @@ code/b
   └── conflict  plan.md
                 error: destination exists; archived copy kept
                 destination: ~/llm/code/b/archive/r9/items/plan.md
-next: dotllm restore --archive r9   # preview what is still archived
+next: dotllm archive --recover r9   # reconcile this exact restore; nothing moves
 `)
 }
 
@@ -332,5 +332,14 @@ func TestUnknownDataIsAnError(t *testing.T) {
 	var out bytes.Buffer
 	if err := WriteText(&out, Envelope{Data: struct{}{}}, Options{}); err == nil || out.Len() != 0 {
 		t.Fatalf("err=%v out=%q", err, out.String())
+	}
+}
+
+func TestIncompleteRestoreRecoveryUsesExactOperationID(t *testing.T) {
+	id := "r-" + strings.Repeat("a", 64) + "-" + strings.Repeat("b", 64)
+	result := archive.Result{PlanID: id, Complete: false, Outcomes: []archive.Outcome{{ProjectKey: "repo", RelativePath: "note", State: "conflict", Error: "origin occupied"}}}
+	text := render(t, "restore", ApplyData{Result: result}, false)
+	if !strings.Contains(text, "dotllm archive --recover "+id) || strings.Contains(text, "dotllm restore --archive "+id) {
+		t.Fatalf("restore must reconcile its exact operation ID, not use it as an archive ID:\n%s", text)
 	}
 }
